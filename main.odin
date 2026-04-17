@@ -1,5 +1,15 @@
 package main
 
+// Typing practice program. I've tried a bunch of them over the years, none of them 
+// handle mistakes very well - I think that the input field should be very similar to a
+// regular text field you would interact with in an OS text box, and your goal is to just
+// make the curent text match the target text using all the same facilities that an OS 
+// textfield would give you.
+// 
+// This idea, pushed to it's logical limit, would result in a series of examples, 
+// with online leaderboards showing how quickly someone was able to complete it. 
+// We can finally figure out is Vim is truly a better input mechanism xD
+
 import "core:math"
 import "core:unicode"
 import "core:c"
@@ -10,7 +20,7 @@ COLOR_FG        :: Color{ 0, 0, 0, 255 }
 COLOR_HIGHLIGHT :: Color{ 0, 120, 215, 255 }
 
 main :: proc() {
-	rl.InitWindow(0, 0, "Ninja")
+	rl.InitWindow(0, 0, "RoboType")
 	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
 	rl.SetExitKey(.KEY_NULL)
 
@@ -40,9 +50,13 @@ State :: struct {
 	range      : SelectionRange,
 	blink_time : f32,
 
+	// TODO: clipboard, undo, find out the remaining features.
+	// Not really necessary for a
+
 	x_start_smooth : f32,
 	x_end_smooth : f32,
-	start_caret_at, end_caret_at : Vec2
+	start_caret_at, end_caret_at : Vec2,
+	is_animated : bool,
 }
 
 SelectionRange :: struct { start, end: int }
@@ -57,6 +71,17 @@ Color :: rl.Color
 Vec2  :: rl.Vector2
 Font  :: rl.Font
 
+delete_selected :: proc(state: ^State) -> bool {
+	if state.range.start == state.range.end  {return false}
+
+	lo := math.min(state.range.end, state.range.start)
+	hi := math.max(state.range.end, state.range.start)
+	remove_range(&state.typed, lo, hi)
+	state.range.end   = lo
+	state.range.start = state.range.end
+
+	return true
+}
 
 run_game :: proc(state: ^State) {
 	// Input
@@ -74,6 +99,7 @@ run_game :: proc(state: ^State) {
 		remove_last_word := is_moving_by_word && rl.IsKeyPressed(.W)
 
 		prev_end := state.range.end
+		prev_len := len(state.typed)
 
 		if rlIsKeyPressedOrRepeated(.LEFT) {
 			if is_moving_by_word {
@@ -138,23 +164,18 @@ run_game :: proc(state: ^State) {
 				inject_at(&state.typed, state.range.end, byte(c))
 				state.range.end   += 1
 				state.range.start = state.range.end
-				state.blink_time  = 0.4
 			}
 		}
 
-		delete_selected :: proc(state: ^State) -> bool {
-			if state.range.start == state.range.end  {return false}
+		mutated := prev_len != len(state.typed)
+		selection_changed := state.range.end != prev_end
 
-			lo := math.min(state.range.end, state.range.start)
-			hi := math.max(state.range.end, state.range.start)
-			remove_range(&state.typed, lo, hi)
-			state.range.end   = lo
-			state.range.start = state.range.end
-
-			return true
+		if mutated || selection_changed {
+			state.is_animated = !mutated
+			state.blink_time  = 0
 		}
 
-		if state.range.end != prev_end {
+		if selection_changed {
 			if !is_range_selecting {
 				state.range.start = state.range.end
 			}
@@ -167,9 +188,10 @@ run_game :: proc(state: ^State) {
 	dt          := state.dt
 
 	center       := window_size / 2
-	cursor_start := Vec2{0, center.y}
 	font_size    := window_size.y * 0.1
+	cursor_start := Vec2{0, center.y} - {0, font_size / 2}
 	spacing      := font_size / 10
+	character_width := f32(rl.MeasureText("w", c.int(font_size)))
 
 
 	// This is the size we need for the cursor to mathematically fit between the letters without
@@ -213,10 +235,16 @@ run_game :: proc(state: ^State) {
 
 		if phase == .Measure {
 			// Make sure that the 'camera' starts at this character.
-			x_start := -start_caret_at.x + window_size.x/ 2
-			x_end   := -end_caret_at.x + window_size.x/ 2
-			state.x_start_smooth = math.lerp(state.x_start_smooth, x_start, 50 * dt)
-			state.x_end_smooth   = math.lerp(state.x_end_smooth, x_end, 50 * dt)
+			x_start := -start_caret_at.x + 6 * (character_width + spacing) // window_size.x/ 2
+			x_end   := -end_caret_at.x   + 6 * (character_width + spacing) // window_size.x/ 2
+
+			if state.is_animated {
+				state.x_start_smooth = math.lerp(state.x_start_smooth, x_start, 50 * dt)
+				state.x_end_smooth   = math.lerp(state.x_end_smooth, x_end, 50 * dt)
+			} else {
+				state.x_start_smooth = x_start
+				state.x_end_smooth   = x_end
+			}
 		}
 	}
 	state.start_caret_at = start_caret_at
