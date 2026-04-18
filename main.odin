@@ -1,5 +1,6 @@
 package main
 
+import "vendor:stb/truetype"
 // Typing practice program. I've tried a bunch of them over the years, none of them 
 // handle mistakes very well - I think that the input field should be very similar to a
 // regular text field you would interact with in an OS text box, and your goal is to just
@@ -11,6 +12,7 @@ package main
 // We can finally figure out is Vim is truly a better input mechanism xD
 
 import "core:math"
+import "core:math/linalg"
 import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
@@ -53,10 +55,9 @@ State :: struct {
 	// TODO: clipboard, undo, find out the remaining features.
 	// Not really necessary for a
 
-	x_start_smooth : f32,
-	x_end_smooth : f32,
+	offset_smooth : Vec2,
 	start_caret_at, end_caret_at : Vec2,
-	is_animated : bool,
+	is_animated                  : bool,
 }
 
 SelectionRange :: struct { start, end: int }
@@ -171,7 +172,10 @@ run_game :: proc(state: ^State) {
 		selection_changed := state.range.end != prev_end
 
 		if mutated || selection_changed {
-			state.is_animated = !mutated
+			// NOTE: this only applies to horizontal movement 
+			// I've recently decided to not have horizontal movement, but yet to fully commit. I'll remove this later
+			// state.is_animated = !mutated
+			state.is_animated = true
 			state.blink_time  = 0
 		}
 
@@ -189,8 +193,9 @@ run_game :: proc(state: ^State) {
 
 	center       := window_size / 2
 	font_size    := window_size.y * 0.1
-	cursor_start := Vec2{0, center.y} - {0, font_size / 2}
 	spacing      := font_size / 10
+	vertical_spacing := font_size / 5
+	cursor_start := Vec2{ spacing, spacing }
 	character_width := f32(rl.MeasureText("w", c.int(font_size)))
 
 
@@ -216,7 +221,8 @@ run_game :: proc(state: ^State) {
 	for phase in UI_PHASES { 
 		cursor := cursor_start
 		if phase == .Draw {
-			cursor.x += state.x_end_smooth
+			// TODO: camera offset
+			cursor -= state.offset_smooth
 		}
 
 		set_start, set_end : bool
@@ -227,7 +233,17 @@ run_game :: proc(state: ^State) {
 			if idx == state.range.end {
 				end_caret_at, set_end = cursor, true
 			}
-			cursor.x += draw_text(cursor, font_size, phase, "%c", char) + spacing
+
+			width := draw_text(.Measure, cursor, font_size, "%c", char)
+			if cursor.x + width > window_size.x {
+				// Wrap the text
+				cursor.x = 0
+				cursor.y += font_size + vertical_spacing
+			}
+			if phase == .Draw {
+				draw_text(.Draw, cursor, font_size, "%c", char)
+			}
+			cursor.x += width + spacing
 		}
 
 		if !set_start { start_caret_at = cursor }
@@ -235,15 +251,16 @@ run_game :: proc(state: ^State) {
 
 		if phase == .Measure {
 			// Make sure that the 'camera' starts at this character.
-			x_start := -start_caret_at.x + 6 * (character_width + spacing) // window_size.x/ 2
-			x_end   := -end_caret_at.x   + 6 * (character_width + spacing) // window_size.x/ 2
+			start := -start_caret_at + 6 * (character_width + spacing)
+			end   := -end_caret_at   + 6 * (character_width + spacing)
+
+			offset := Vec2{ spacing, end_caret_at.y - 3 * font_size }
 
 			if state.is_animated {
-				state.x_start_smooth = math.lerp(state.x_start_smooth, x_start, 50 * dt)
-				state.x_end_smooth   = math.lerp(state.x_end_smooth, x_end, 50 * dt)
+				t := 50 * dt
+				state.offset_smooth = linalg.lerp(state.offset_smooth, offset, t)
 			} else {
-				state.x_start_smooth = x_start
-				state.x_end_smooth   = x_end
+				state.offset_smooth = offset
 			}
 		}
 	}
@@ -312,7 +329,7 @@ UiPhase :: enum {
 
 UI_PHASES :: []UiPhase { .Measure, .Draw }
 
-draw_text :: proc(cursor: Vec2, font_size: f32, phase: UiPhase, fmt: cstring, args: ..any) -> f32 {
+draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, fmt: cstring, args: ..any) -> f32 {
 	text  := rl.TextFormat(fmt, ..args)
 	width := rl.MeasureText(text, c.int(font_size))
 	if phase == .Draw {
