@@ -15,7 +15,7 @@ set_logging_type :: proc(type: LoggingType) {
 	logging_type = type
 }
 
-debug_log :: proc(format: string, args: ..any, location := #caller_location) {
+debug_log :: proc(format: string, args: ..any, location := #caller_location, type := logging_type) {
 	switch logging_type {
 	case .None:
 	case .Logger:
