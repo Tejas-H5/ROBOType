@@ -1,6 +1,5 @@
 package main
 
-import "vendor:stb/truetype"
 // Typing practice program. I've tried a bunch of them over the years, none of them 
 // handle mistakes very well - I think that the input field should be very similar to a
 // regular text field you would interact with in an OS text box, and your goal is to just
@@ -75,13 +74,19 @@ Font  :: rl.Font
 delete_selected :: proc(state: ^State) -> bool {
 	if state.range.start == state.range.end  {return false}
 
-	lo := math.min(state.range.end, state.range.start)
-	hi := math.max(state.range.end, state.range.start)
+	lo, hi := get_lo_hi(state.range)
 	remove_range(&state.typed, lo, hi)
+
 	state.range.end   = lo
 	state.range.start = state.range.end
 
 	return true
+}
+
+get_lo_hi :: proc(range: SelectionRange) -> (int, int) {
+	lo := math.min(range.end, range.start)
+	hi := math.max(range.end, range.start)
+	return lo, hi
 }
 
 run_game :: proc(state: ^State) {
@@ -192,7 +197,7 @@ run_game :: proc(state: ^State) {
 	dt          := state.dt
 
 	center       := window_size / 2
-	font_size    := window_size.y * 0.1
+	font_size    := window_size.y * 0.07
 	spacing      := font_size / 10
 	vertical_spacing := font_size / 5
 	cursor_start := Vec2{ spacing, spacing }
@@ -205,17 +210,6 @@ run_game :: proc(state: ^State) {
 	cursor_padding := (spacing - cursor_width) / 2
 
 	state.blink_time += dt
-
-	// draw highlight under text. thank fk its not a multiline input. Although that wouldnt be too hard if you broke it down into { first line, middle lines, last line } subproblems
-	{
-		min := math.min(state.start_caret_at.x, state.end_caret_at.x)
-		max := math.max(state.start_caret_at.x, state.end_caret_at.x)
-		rl.DrawRectangleV(
-			{ min + cursor_padding - spacing, state.start_caret_at.y },
-			{ max - min, font_size },
-			COLOR_HIGHLIGHT
-		)
-	}
 
 	start_caret_at, end_caret_at : Vec2
 	for phase in UI_PHASES { 
@@ -234,14 +228,22 @@ run_game :: proc(state: ^State) {
 				end_caret_at, set_end = cursor, true
 			}
 
-			width := draw_text(.Measure, cursor, font_size, "%c", char)
+			width := draw_text(.Measure, cursor, font_size, COLOR_BG, "%c", char)
 			if cursor.x + width > window_size.x {
 				// Wrap the text
 				cursor.x = 0
 				cursor.y += font_size + vertical_spacing
 			}
 			if phase == .Draw {
-				draw_text(.Draw, cursor, font_size, "%c", char)
+				lo, hi := get_lo_hi(state.range)
+				is_highlighted := lo <= idx && idx < hi
+
+				if is_highlighted {
+					rl.DrawRectangleV(cursor - {spacing / 2, vertical_spacing / 2}, {width + spacing, font_size + vertical_spacing}, COLOR_HIGHLIGHT)
+					draw_text(.Draw, cursor, font_size, COLOR_BG, "%c", char)
+				} else {
+					draw_text(.Draw, cursor, font_size, COLOR_FG, "%c", char)
+				}
 			}
 			cursor.x += width + spacing
 		}
@@ -254,7 +256,11 @@ run_game :: proc(state: ^State) {
 			start := -start_caret_at + 6 * (character_width + spacing)
 			end   := -end_caret_at   + 6 * (character_width + spacing)
 
-			offset := Vec2{ spacing, end_caret_at.y - 3 * font_size }
+			offset : Vec2
+			point_where_we_should_start_scrolling := window_size.y - 3 * font_size
+			if end_caret_at.y > point_where_we_should_start_scrolling {
+				offset.y = end_caret_at.y - point_where_we_should_start_scrolling
+			}
 
 			if state.is_animated {
 				t := 50 * dt
@@ -329,11 +335,11 @@ UiPhase :: enum {
 
 UI_PHASES :: []UiPhase { .Measure, .Draw }
 
-draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, fmt: cstring, args: ..any) -> f32 {
+draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, color: Color, fmt: cstring, args: ..any) -> f32 {
 	text  := rl.TextFormat(fmt, ..args)
 	width := rl.MeasureText(text, c.int(font_size))
 	if phase == .Draw {
-		rl.DrawText(text, c.int(cursor.x), c.int(cursor.y), c.int(font_size), COLOR_FG)
+		rl.DrawText(text, c.int(cursor.x), c.int(cursor.y), c.int(font_size), color)
 	}
 	return f32(width)
 }
