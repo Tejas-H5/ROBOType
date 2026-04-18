@@ -1,0 +1,2 @@
+Domain Driven Design is the idea that different parts of your code are responsible for different things.
+It's very simlple actually. Right? 

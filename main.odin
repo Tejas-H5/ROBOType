@@ -2,7 +2,6 @@ package main
 
 import "core:slice"
 import "core:strings"
-import "core:fmt"
 import "core:os"
 import "core:math"
 import "core:math/linalg"
@@ -10,22 +9,35 @@ import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
 
-
-// Typing practice program. I've tried a bunch of them over the years, none of them 
-// handle mistakes very well - I think that the input field should be very similar to a
-// regular text field you would interact with in an OS text box, and your goal is to just
-// make the curent text match the target text using all the same facilities that an OS 
-// textfield would give you.
-// 
-// This idea, pushed to it's logical limit, would result in a series of examples, 
-// with online leaderboards showing how quickly someone was able to complete it. 
-// We can finally figure out is Vim is truly a better input mechanism xD
-
+View :: enum {
+	Collections,
+	Samples,
+	Typing,
+}
 
 State :: struct {
 	requested_quit : bool,
 	size           : Vec2,
 	dt             : f32,
+
+	view: View,
+
+	available_collections : [dynamic]Collection,
+	collection_idx        : int,
+
+	available_samples : [dynamic]Sample,
+	sample_idx : int,
+
+	typing: TypingState,
+}
+
+Collection :: struct {
+	name: string,
+	fullpath: string,
+}
+
+TypingState :: struct {
+	sample: ^Sample,
 
 	// NOTE: make sure that the font is monospace, so that we can display the
 	// target letter right above what was actually typed, without any letter spacing issues
@@ -39,11 +51,6 @@ State :: struct {
 	offset_smooth : Vec2,
 	start_caret_at, end_caret_at : Vec2,
 	is_animated                  : bool,
-
-	available_samples : [dynamic]Sample,
-	current_sample    : ^Sample,
-
-	error : string,
 }
 
 Sample :: struct {
@@ -53,8 +60,8 @@ Sample :: struct {
 
 SelectionRange :: struct { start, end: int }
 
-
 COLOR_BG        :: Color{ 255, 255, 255, 255 }
+COLOR_BG2       :: Color{ 200, 200, 200, 255 }
 COLOR_FG        :: Color{ 0, 0, 0, 255 }
 COLOR_TARGET    :: Color{ 125, 125, 125, 255 }
 COLOR_HIGHLIGHT :: Color{ 0, 120, 215, 255 }
@@ -93,23 +100,49 @@ main :: proc() {
 	}
 }
 
-
-load_game_state :: proc() -> (state: ^State) {
-	state = new(State)
-
+load_available_collections :: proc(state: ^State) {
+	files, err := os.read_all_directory_by_path("./collections", context.temp_allocator)
+	assert(err == nil)
 	defer free_all(context.temp_allocator)
 
-	files, err := os.read_all_directory_by_path("./text", context.temp_allocator)
-	if err != nil {
-		delete(state.error)
-		state.error = fmt.aprintf("Couldn't open the text folder: %v", err)
-		return
+	clear(&state.available_collections)
+	for file in files {
+		if file.type == .Directory {
+			collection := Collection{
+				name = strings.clone(file.name),
+				fullpath = strings.clone(file.fullpath),
+			}
+			append(&state.available_collections, collection)
+		}
 	}
+	
+	state.collection_idx = 0
+}
+
+load_game_state :: proc() -> ^State {
+	state := new(State)
+
+	load_available_collections(state)
+	// if len(state.available_collections) > 0 {
+	// 	load_collection(state, state.available_collections[0].fullpath)
+	// }
+	//
+	return state
+}
+
+load_collection :: proc(state: ^State, collection_path: string) {
+	defer free_all(context.temp_allocator)
+
+	files, err := os.read_all_directory_by_path(collection_path, context.temp_allocator)
+	assert(err == nil)
 
 	sb := make([dynamic]byte)
 	defer delete(sb)
 
+	clear(&state.available_samples)
 	for file in files {
+		if file.type != .Regular {continue}
+
 		text, err := os.read_entire_file_from_path(file.fullpath, context.temp_allocator)
 		assert(err == nil)
 
@@ -127,7 +160,10 @@ load_game_state :: proc() -> (state: ^State) {
 				append(&sb, b)
 			}
 
-			append(&sb, '\n')
+			remaining_trimmed := strings.trim_right_space(text_str)
+			if remaining_trimmed != "" {
+				append(&sb, '\n')
+			}
 		}
 
 		sample := Sample {
@@ -138,11 +174,8 @@ load_game_state :: proc() -> (state: ^State) {
 		append(&state.available_samples, sample)
 	}
 
-	debug_log("%v sample loaded", len(state.available_samples), type=.Logger)
-
 	if len(state.available_samples) > 0 {
-		state.current_sample = &state.available_samples[0];
-		debug_log("current sample: %v", state.current_sample.name, type=.Logger)
+		state.sample_idx = 0
 	}
 
 	return
@@ -152,7 +185,7 @@ Color :: rl.Color
 Vec2  :: rl.Vector2
 Font  :: rl.Font
 
-delete_selected :: proc(state: ^State) -> bool {
+delete_selected :: proc(state: ^TypingState) -> bool {
 	if state.range.start == state.range.end  {return false}
 
 	lo, hi := get_lo_hi(state.range)
@@ -171,14 +204,24 @@ get_lo_hi :: proc(range: SelectionRange) -> (int, int) {
 }
 
 run_game :: proc(state: ^State) {
+	if state.requested_quit {return;}
+
+	switch state.view {
+	case .Collections: run_collection_selector(state)
+	case .Samples:     run_sample_selector(state)
+	case .Typing:      run_typing(state, &state.typing)
+	}
+}
+
+run_typing :: proc(state: ^State, typing: ^TypingState) {
+	if typing.sample == nil {return}
+
+	switch {
+	case rlIsKeyPressedOrRepeated(.ESCAPE): state.view = .Samples
+	}
+
 	// Input
 	{
-		if state.requested_quit {return;}
-		if rl.IsKeyPressed(.ESCAPE) {
-			state.requested_quit = true
-			return;
-		}
-
 		// TODO: Moving up and down lines! (hard feature)
 		// TODO: Tab
 		// TODO: VIM bindings support
@@ -187,74 +230,74 @@ run_game :: proc(state: ^State) {
 		is_moving_by_word  := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 		remove_last_word := is_moving_by_word && rlIsKeyPressedOrRepeated(.W)
 
-		prev_end := state.range.end
-		prev_len := len(state.typed)
+		prev_end := typing.range.end
+		prev_len := len(typing.typed)
 
 		if rlIsKeyPressedOrRepeated(.LEFT) {
 			if is_moving_by_word {
-				new_pos := move_cursor_prev_boundary(state.range.end, state.typed[:])
-				set_cursor_pos(state, new_pos, is_range_selecting)
+				new_pos := move_cursor_prev_boundary(typing.range.end, typing.typed[:])
+				set_cursor_pos(typing, new_pos, is_range_selecting)
 			} else {
-				new_pos := state.range.end - 1
-				set_cursor_pos(state, new_pos, is_range_selecting)
+				new_pos := typing.range.end - 1
+				set_cursor_pos(typing, new_pos, is_range_selecting)
 			}
 		}
 
 		if rlIsKeyPressedOrRepeated(.RIGHT) {
 			if is_moving_by_word {
-				new_pos := move_cursor_next_boundary(state.range.end, state.typed[:])
-				set_cursor_pos(state, new_pos, is_range_selecting)
+				new_pos := move_cursor_next_boundary(typing.range.end, typing.typed[:])
+				set_cursor_pos(typing, new_pos, is_range_selecting)
 			} else {
-				new_pos := state.range.end + 1
-				set_cursor_pos(state, new_pos, is_range_selecting)
+				new_pos := typing.range.end + 1
+				set_cursor_pos(typing, new_pos, is_range_selecting)
 			}
 		}
 
 		if rlIsKeyPressedOrRepeated(.HOME) {
-			pos := state.range.end
-			for pos > 0 && char_at(state.typed[:], pos - 1) != '\n' {
+			pos := typing.range.end
+			for pos > 0 && char_at(typing.typed[:], pos - 1) != '\n' {
 				pos -= 1
 			}
 
-			set_cursor_pos(state, pos, is_range_selecting)
+			set_cursor_pos(typing, pos, is_range_selecting)
 		}
 		if rlIsKeyPressedOrRepeated(.END) { 
-			pos := state.range.end
-			n := len(state.typed)
-			for pos < n && char_at(state.typed[:], pos) != '\n' {
+			pos := typing.range.end
+			n := len(typing.typed)
+			for pos < n && char_at(typing.typed[:], pos) != '\n' {
 				pos += 1
 			}
 
-			set_cursor_pos(state, pos, is_range_selecting)
+			set_cursor_pos(typing, pos, is_range_selecting)
 		}
 
 		if rlIsKeyPressedOrRepeated(.BACKSPACE) || remove_last_word {
-			if !delete_selected(state) {
+			if !delete_selected(typing) {
 				if is_moving_by_word {
-					lo := move_cursor_prev_boundary(state.range.end, state.typed[:])
-					if lo != state.range.end {
-						remove_range(&state.typed, lo, state.range.end)
-						set_cursor_pos(state, lo, false)
+					lo := move_cursor_prev_boundary(typing.range.end, typing.typed[:])
+					if lo != typing.range.end {
+						remove_range(&typing.typed, lo, typing.range.end)
+						set_cursor_pos(typing, lo, false)
 					}
 				} else {
-					if state.range.end > 0 {
-						ordered_remove(&state.typed, state.range.end - 1)
-						set_cursor_pos(state, state.range.end - 1, false)
+					if typing.range.end > 0 {
+						ordered_remove(&typing.typed, typing.range.end - 1)
+						set_cursor_pos(typing, typing.range.end - 1, false)
 					}
 				}
 			}
 		}
 
 		if rlIsKeyPressedOrRepeated(.DELETE) {
-			if !delete_selected(state) {
+			if !delete_selected(typing) {
 				if is_moving_by_word {
-					hi := move_cursor_next_boundary(state.range.end, state.typed[:])
-					if hi != state.range.end {
-						remove_range(&state.typed, state.range.end, hi)
-						set_cursor_pos(state, state.range.end, false)
+					hi := move_cursor_next_boundary(typing.range.end, typing.typed[:])
+					if hi != typing.range.end {
+						remove_range(&typing.typed, typing.range.end, hi)
+						set_cursor_pos(typing, typing.range.end, false)
 					}
 				} else {
-					ordered_remove(&state.typed, state.range.end)
+					ordered_remove(&typing.typed, typing.range.end)
 				}
 			}
 		}
@@ -265,23 +308,23 @@ run_game :: proc(state: ^State) {
 				c := rl.GetCharPressed()
 				if c == 0 {break}
 
-				type_char(state, c)
+				type_char(typing, c)
 			}
 		}
 
 		if rlIsKeyPressedOrRepeated(.ENTER) {
-			type_char(state, '\n')
+			type_char(typing, '\n')
 		}
 
-		mutated := prev_len != len(state.typed)
-		selection_changed := state.range.end != prev_end
+		mutated := prev_len != len(typing.typed)
+		selection_changed := typing.range.end != prev_end
 
 		if mutated || selection_changed {
 			// NOTE: this only applies to horizontal movement 
 			// I've recently decided to not have horizontal movement, but yet to fully commit. I'll remove this later
 			// state.is_animated = !mutated
-			state.is_animated = true
-			state.blink_time  = 0
+			typing.is_animated = true
+			typing.blink_time  = 0
 		}
 	}
 
@@ -293,8 +336,8 @@ run_game :: proc(state: ^State) {
 	center       := window_size / 2
 	font_size    := window_size.y * 0.05
 	spacing      := font_size / 10
-	row_offset   := Vec2{0, font_size + spacing}
 	vertical_spacing := font_size / 5
+	row_offset   := Vec2{0, font_size + spacing}
 	cursor_start := Vec2{ spacing, spacing }
 	character_width := f32(rl.MeasureText("w", c.int(font_size)))
 
@@ -304,30 +347,30 @@ run_game :: proc(state: ^State) {
 	cursor_width   := spacing / 2
 	cursor_padding := (spacing - cursor_width) / 2
 
-	state.blink_time += dt
+	typing.blink_time += dt
 
-	chars_to_draw := math.max(len(state.typed), len(state.current_sample.text))
+	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
 
 	start_caret_at, end_caret_at : Vec2
 	for phase in UI_PHASES { 
 		cursor := cursor_start
 		if phase == .Draw {
 			// TODO: camera offset
-			cursor -= state.offset_smooth
+			cursor -= typing.offset_smooth
 		}
 
 		set_start, set_end : bool
 		for idx in 0..<chars_to_draw {
-			char, has_char          := char_ok(state.typed[:], idx)
-			target_char, has_target := char_ok(state.current_sample.text, idx)
+			char, has_char          := char_ok(typing.typed[:], idx)
+			target_char, has_target := char_ok(typing.sample.text, idx)
 
 			target_is_newline := target_char == '\n'
 			is_newline        := char == '\n'
 
-			if idx == state.range.start {
+			if idx == typing.range.start {
 				start_caret_at, set_start = cursor + row_offset, true
 			}
-			if idx == state.range.end {
+			if idx == typing.range.end {
 				end_caret_at, set_end = cursor + row_offset, true
 			}
 
@@ -350,7 +393,7 @@ run_game :: proc(state: ^State) {
 
 			if phase == .Draw {
 				is_wrong := has_char && has_target && target_char != char
-				lo, hi         := get_lo_hi(state.range)
+				lo, hi         := get_lo_hi(typing.range)
 				is_highlighted := lo <= idx && idx < hi
 
 				// Target text
@@ -419,23 +462,23 @@ run_game :: proc(state: ^State) {
 				offset.y = end_caret_at.y - point_where_we_should_start_scrolling
 			}
 
-			if state.is_animated {
+			if typing.is_animated {
 				t := 50 * dt
-				state.offset_smooth = linalg.lerp(state.offset_smooth, offset, t)
+				typing.offset_smooth = linalg.lerp(typing.offset_smooth, offset, t)
 			} else {
-				state.offset_smooth = offset
+				typing.offset_smooth = offset
 			}
 		}
 	}
-	state.start_caret_at = start_caret_at
-	state.end_caret_at = end_caret_at
+	typing.start_caret_at = start_caret_at
+	typing.end_caret_at = end_caret_at
 
 	BLINK_TIME :: 1.0
-	if state.blink_time > BLINK_TIME {
-		state.blink_time -= BLINK_TIME
+	if typing.blink_time > BLINK_TIME {
+		typing.blink_time -= BLINK_TIME
 	}
 
-	if state.blink_time < BLINK_TIME / 2 {
+	if typing.blink_time < BLINK_TIME / 2 {
 		rl.DrawRectangleV({ end_caret_at.x + cursor_padding - spacing, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
 	}
 
@@ -450,16 +493,11 @@ run_game :: proc(state: ^State) {
 
 		rl.DrawRectangleV(top_corner, {window_size.x, statusline_height}, COLOR_BG)
 
-		if state.current_sample != nil {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", state.current_sample.name)
-		} else {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", "None")
-		}
+		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", typing.sample.name)
 
 		cursor.x += font_size // NOTE: font_size is a vertical unit, so it's strange to use it horizontally. it'll do for now
 	}
 }
-
 
 
 LetterType :: enum {
@@ -518,6 +556,8 @@ UiPhase :: enum {
 	Draw,
 }
 
+// Useful when you need to loop over a bunch of rows just to figure out how tall a thing is, so you can center it vertically.
+// Do let me know if there is a better way to center UI :)
 UI_PHASES :: []UiPhase { .Measure, .Draw }
 
 draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, color: Color, fmt: cstring, args: ..any) -> f32 {
@@ -543,14 +583,14 @@ char_ok :: proc(text: []byte, idx: int) -> (byte, bool) {
 	return text[idx], true
 }
 
-type_char :: proc(state: ^State, c: rune) {
+type_char :: proc(state: ^TypingState, c: rune) {
 	delete_selected(state)
 
 	inject_at(&state.typed, state.range.end, byte(c))
 	set_cursor_pos(state, state.range.end + 1, false)
 }
 
-set_cursor_pos :: proc(state: ^State, pos: int, is_range_selecting: bool) {
+set_cursor_pos :: proc(state: ^TypingState, pos: int, is_range_selecting: bool) {
 	pos := math.clamp(pos, 0, len(state.typed))
 	state.range.end = pos
 	if !is_range_selecting {
@@ -565,4 +605,114 @@ draw_letter_highlight :: proc(cursor: Vec2, width, spacing, vertical_spacing, fo
 		color,
 	)
 }
+
+run_collection_selector :: proc(state: ^State) {
+	if len(state.available_collections) == 0 { return }
+
+	center    := state.size / 2
+	font_size := state.size.y * 0.1
+	vertical_spacing  := font_size / 5
+
+	cursor_start := Vec2{ center.x, 10 }
+
+	switch{
+	case rlIsKeyPressedOrRepeated(.DOWN): state.collection_idx += 1
+	case rlIsKeyPressedOrRepeated(.UP):   state.collection_idx -= 1
+	case rlIsKeyPressedOrRepeated(.ENTER): 
+		load_collection(state, state.available_collections[state.collection_idx].fullpath)
+		state.view = .Samples
+	case rlIsKeyPressedOrRepeated(.ESCAPE):
+		state.requested_quit = true
+	}
+	state.collection_idx = math.clamp(state.collection_idx, 0, len(state.available_collections) - 1)
+
+	rl.ClearBackground(COLOR_BG)
+
+	cursor : Vec2
+	cursor_selected : Vec2
+	for phase in UI_PHASES {
+		if phase == .Draw {
+			cursor = { cursor_start.x, center.y - cursor_selected.y / 2 - font_size / 2 }
+		}
+
+		for &collection, idx in state.available_collections {
+			selected := idx == state.collection_idx
+			size := draw_centered_label(state, phase, cursor, font_size, collection.name, selected=selected)
+			if phase == .Measure && selected {
+				cursor_selected = cursor
+			}
+
+			cursor += { 0, size.y }
+		}
+	}
+
+	// Top bar
+	top_corner := Vec2{0, 0}
+	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a collection")
+}
+
+run_sample_selector :: proc(state: ^State) {
+	if len(state.available_samples) == 0 { return }
+
+	center    := state.size / 2
+	font_size := state.size.y * 0.1
+	vertical_spacing  := font_size / 5
+
+	cursor_start := Vec2{ center.x, 10 }
+
+	switch{
+	case rlIsKeyPressedOrRepeated(.DOWN): state.sample_idx += 1
+	case rlIsKeyPressedOrRepeated(.UP):   state.sample_idx -= 1
+	case rlIsKeyPressedOrRepeated(.ENTER): 
+		state.typing.sample = &state.available_samples[state.sample_idx]
+		state.view = .Typing
+	case rlIsKeyPressedOrRepeated(.ESCAPE):
+		state.view = .Collections
+	}
+	state.sample_idx = math.clamp(state.sample_idx, 0, len(state.available_samples) - 1)
+
+	rl.ClearBackground(COLOR_BG)
+
+	cursor : Vec2
+	cursor_selected : Vec2
+	for phase in UI_PHASES {
+		if phase == .Draw {
+			cursor = { cursor_start.x, center.y - cursor_selected.y / 2 - font_size / 2 }
+		}
+
+		for &sample, idx in state.available_samples {
+			selected := idx == state.sample_idx
+			size := draw_centered_label(state, phase, cursor, font_size, sample.name, selected=selected)
+			if phase == .Measure && selected {
+				cursor_selected = cursor
+			}
+
+			cursor += { 0, size.y }
+		}
+	}
+
+	// Top bar
+	top_corner := Vec2{0, 0}
+	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a sample")
+}
+
+draw_centered_label :: proc(state: ^State, phase: UiPhase, cursor: Vec2, font_size: f32, name: string, selected := false, width: f32 = -1) -> Vec2 {
+	width := width
+	if width < 0 {
+		width = draw_text(.Measure, cursor, font_size, COLOR_FG, "%v", name)
+	}
+
+	if selected {
+		if phase == .Draw {
+			rl.DrawRectangleV(cursor + { -width / 2, 0 }, {width, font_size}, COLOR_BG2)
+		}
+	}
+
+	if phase == .Draw {
+		draw_text(.Draw, cursor + {-width / 2, 0 }, font_size, COLOR_FG, "%v", name)
+	}
+
+	return {width, font_size}
+}
+
 
