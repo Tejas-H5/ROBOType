@@ -331,6 +331,54 @@ run_typing :: proc(state: ^State) {
 			set_cursor_pos(typing, pos, is_range_selecting)
 		}
 
+		// Up and down arrows. The code is just a more complicated version of HOME/END
+		if rlIsKeyPressedOrRepeated(.UP) {
+			// Move the cursor up
+
+			required_offset := 0
+			pos := typing.range.end
+			for pos > 0 && char_at(typing.typed[:], pos - 1) != '\n' {
+				pos -= 1
+				required_offset += 1
+			}
+			if pos > 0 { pos -= 1 }
+			for pos > 0 && char_at(typing.typed[:], pos - 1) != '\n' {
+				pos -= 1
+			}
+			n := len(typing.typed)
+			for pos < n && char_at(typing.typed[:], pos) != '\n' && required_offset > 0 {
+				pos += 1
+				required_offset -= 1
+			}
+
+			set_cursor_pos(typing, pos, is_range_selecting)
+		}
+		if rlIsKeyPressedOrRepeated(.DOWN) {
+			// Move the cursor down
+
+			start_pos := typing.range.end
+
+			required_offset := 0
+			pos := start_pos
+			for pos > 0 && char_at(typing.typed[:], pos - 1) != '\n' {
+				pos -= 1
+				required_offset += 1
+			}
+
+			pos = start_pos
+			n := len(typing.typed)
+			for pos < n && char_at(typing.typed[:], pos) != '\n' {
+				pos += 1
+			}
+			if pos < n {pos += 1}
+			for pos < n && char_at(typing.typed[:], pos) != '\n' && required_offset > 0 {
+				pos += 1
+				required_offset -= 1
+			}
+
+			set_cursor_pos(typing, pos, is_range_selecting)
+		}
+
 		if rlIsKeyPressedOrRepeated(.BACKSPACE) || remove_last_word {
 			if !delete_selected(typing) {
 				if is_moving_by_word {
