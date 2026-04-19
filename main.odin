@@ -1,6 +1,5 @@
 package main
 
-import "core:unicode/utf8/utf8string"
 import "core:slice"
 import "core:strings"
 import "core:os"
@@ -14,8 +13,9 @@ View :: enum {
 	Collections,
 	Samples,
 	Typing,
-	Completed,
 }
+
+font: Font
 
 State :: struct {
 	requested_quit : bool,
@@ -62,6 +62,7 @@ TypingState :: struct {
 	// cursor around and copy-pasting stuff. 
 	started_time  : f64,
 	finished_time : f64,
+	completed : bool,
 }
 
 Sample :: struct {
@@ -77,7 +78,7 @@ COLOR_FG        :: Color{ 0, 0, 0, 255 }
 COLOR_TARGET    :: Color{ 125, 125, 125, 255 }
 COLOR_HIGHLIGHT :: Color{ 0, 120, 215, 255 }
 COLOR_WRONG     :: Color{ 255, 125, 125, 255 }
-COLOR_RED        :: Color{ 255, 0, 0, 255 }
+COLOR_RED       :: Color{ 255, 0, 0, 255 }
 
 last_monitor : c.int
 
@@ -126,14 +127,18 @@ load_available_collections :: proc(state: ^State) {
 			append(&state.available_collections, collection)
 		}
 	}
-	
-	state.collection_idx = 0
+	state.collection_idx = math.clamp(state.collection_idx, 0, len(state.available_collections) - 1)
 }
 
 load_game_state :: proc() -> ^State {
 	state := new(State)
 
 	state.view = .Collections
+
+	// The truetype font as loaded by RayLib looks like ass for some reason. 
+	// Manually converting it to a bitmap font does not help.
+	font = rl.LoadFontEx("./font/IBMPlexMono-Regular.ttf", 64, nil, 250)
+	// rl.SetTextureFilter(font.texture, .POINT)
 
 	load_available_collections(state)
 
@@ -160,7 +165,7 @@ load_collection :: proc(state: ^State, collection_path: string) {
 
 		text_str := string(text)
 		for line in strings.split_lines_iterator(&text_str) {
-			line_trimmed := transmute([]byte)strings.trim_space(line)
+			line_trimmed := transmute([]byte)strings.trim_right_space(line)
 			if len(line_trimmed) == 0 {continue}
 
 			for b in line_trimmed {
@@ -220,7 +225,6 @@ run_game :: proc(state: ^State) {
 	case .Collections: run_collection_selector(state)
 	case .Samples:     run_sample_selector(state)
 	case .Typing:      run_typing(state)
-	case .Completed:   run_completed(state)
 	}
 }
 
@@ -361,17 +365,11 @@ run_typing :: proc(state: ^State) {
 
 	center       := window_size / 2
 	font_size    := window_size.y * 0.05
-	spacing      := font_size / 10
+	spacing      := f32(0) // font_size / 10
 	vertical_spacing := font_size / 5
 	row_offset   := Vec2{0, font_size + spacing}
 	cursor_start := Vec2{ spacing, spacing }
-	character_width := f32(rl.MeasureText("w", c.int(font_size)))
-
-
-	// This is the size we need for the cursor to mathematically fit between the letters without
-	// touching the letters and also distribute the spacing nicely
-	cursor_width   := spacing / 2
-	cursor_padding := (spacing - cursor_width) / 2
+	character_width := f32(rl.MeasureTextEx(font, "w", font_size, 0).x)
 
 	typing.blink_time += dt
 
@@ -386,91 +384,38 @@ run_typing :: proc(state: ^State) {
 		}
 
 		set_start, set_end : bool
-		for idx in 0..<chars_to_draw {
-			char, has_char          := char_ok(typing.typed[:], idx)
-			target_char, has_target := char_ok(typing.sample.text, idx)
+		idx : int
+		for idx < chars_to_draw {
+			cursor_start := cursor
+			result := draw_text_row(
+				.Measure,
+				typing, 
+				idx, chars_to_draw,
+				cursor_start,
+				font_size, vertical_spacing, spacing, row_offset,
+				window_size,
+				draw_target_row = true
+			)
+			result = draw_text_row(
+				phase,
+				typing, 
+				idx, chars_to_draw,
+				cursor_start,
+				font_size, vertical_spacing, spacing, row_offset,
+				window_size,
+				draw_target_row = !result.all_right
+			)
 
-			target_is_newline := target_char == '\n'
-			is_newline        := char == '\n'
+			idx    = result.idx
+			cursor = result.cursor
 
-			if idx == typing.range.start {
-				start_caret_at, set_start = cursor + row_offset, true
+			if result.set_start {
+				set_start = result.set_start
+				start_caret_at = result.start_caret_at
 			}
-			if idx == typing.range.end {
-				end_caret_at, set_end = cursor + row_offset, true
-			}
-
-			NEWLINE_STR :: "\\n"
-
-			width : f32
-			if target_is_newline || is_newline {
-				width = draw_text(.Measure, {}, font_size, COLOR_FG, "%v", NEWLINE_STR)
-			} else {
-				target_width := draw_text(.Measure, cursor, font_size, COLOR_BG, "%c", target_char)
-				char_width   := !has_char ? target_width : draw_text(.Measure, cursor, font_size, COLOR_BG, "%c", char)
-				width        = math.max(char_width, target_width)
-			}
-
-			if cursor.x + width > window_size.x {
-				// Wrap the text. Need to do it here, when we know the size of the char.
-				cursor.x = cursor_start.x
-				cursor.y += 2 * (font_size + vertical_spacing)
-			}
-
-			if phase == .Draw {
-				is_wrong := has_char && has_target && target_char != char
-				lo, hi         := get_lo_hi(typing.range)
-				is_highlighted := lo <= idx && idx < hi
-
-				// Target text
-				{
-					text_col := COLOR_TARGET
-					if is_wrong {
-						text_col = COLOR_BG
-					}
-
-					if is_wrong {
-						draw_letter_highlight(cursor, width, spacing, vertical_spacing, font_size, COLOR_WRONG)
-					}
-
-					if target_is_newline {
-						if is_wrong {
-							draw_text(.Draw, cursor, font_size, text_col, NEWLINE_STR)
-						}
-					} else {
-						draw_text(.Draw, cursor, font_size, text_col, "%c", target_char)
-					}
-				}
-
-				// Typed text
-				{
-					cursor := cursor + row_offset
-
-					text_col := COLOR_FG
-					if is_highlighted {
-						text_col = COLOR_BG
-					}
-
-					if is_highlighted {
-						draw_letter_highlight(cursor, width, spacing, vertical_spacing, font_size, COLOR_HIGHLIGHT)
-					}
-
-					if is_newline {
-						if is_wrong {
-							draw_text(.Draw, cursor, font_size, text_col, NEWLINE_STR)
-						}
-					} else {
-						draw_text(.Draw, cursor, font_size, text_col, "%c", char)
-					}
-				}
-
-			}
-
-			cursor.x += width + spacing
-			if target_is_newline {
-				// Start a new line (needs to be done _after_ rendering the newline
-				cursor.x = cursor_start.x
-				cursor.y += 2 * (font_size + vertical_spacing)
+			if result.set_end {
+				set_end = result.set_end
+				end_caret_at = result.end_caret_at
 			}
 		}
 
@@ -483,7 +428,7 @@ run_typing :: proc(state: ^State) {
 			end   := -end_caret_at   + 6 * (character_width + spacing)
 
 			offset : Vec2
-			point_where_we_should_start_scrolling := 2 * (2 * font_size)
+			point_where_we_should_start_scrolling := center.y
 			if end_caret_at.y > point_where_we_should_start_scrolling {
 				offset.y = end_caret_at.y - point_where_we_should_start_scrolling
 			}
@@ -505,7 +450,11 @@ run_typing :: proc(state: ^State) {
 	}
 
 	if typing.blink_time < BLINK_TIME / 2 {
-		rl.DrawRectangleV({ end_caret_at.x + cursor_padding - spacing, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
+		// This is the size we need for the cursor to mathematically fit between the letters without
+		// touching the letters and also distribute the spacing nicely
+		cursor_width   := font_size / 10
+
+		rl.DrawRectangleV({ end_caret_at.x + cursor_width, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
 	}
 
 	// Status line
@@ -552,8 +501,6 @@ get_letter_type :: proc(b: byte) -> LetterType {
 		return .Punctuation
 	}
 
-	debug_log("other: %v", r)
-
 	return .Other
 }
 
@@ -588,6 +535,9 @@ move_cursor_next_boundary :: proc(pos: int, text: []byte) -> int {
 	return pos
 }
 
+// Pretend to draw something. Measure how big it was, and use that info to draw it in the right place, or to draw it differently.
+// It can be used for any kind of measuring though. E.g I also use it to check if we encoutnered any incorrect letters, and if not, 
+// render the text row _without_ the target row.
 UiPhase :: enum {
 	Measure,
 	Draw,
@@ -599,9 +549,9 @@ UI_PHASES :: []UiPhase { .Measure, .Draw }
 
 draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, color: Color, fmt: cstring, args: ..any) -> f32 {
 	text  := rl.TextFormat(fmt, ..args)
-	width := rl.MeasureText(text, c.int(font_size))
+	width := rl.MeasureTextEx(font, text, font_size, 0).x
 	if phase == .Draw {
-		rl.DrawText(text, c.int(cursor.x), c.int(cursor.y), c.int(font_size), color)
+		rl.DrawTextEx(font, text, cursor, font_size, 0, color)
 	}
 	return f32(width)
 }
@@ -669,7 +619,7 @@ run_collection_selector :: proc(state: ^State) {
 	cursor_selected : Vec2
 	for phase in UI_PHASES {
 		if phase == .Draw {
-			cursor = { cursor_start.x, center.y - cursor_selected.y / 2 - font_size / 2 }
+			cursor = { cursor_start.x, center.y - cursor_selected.y - font_size / 2 }
 		}
 
 		for &collection, idx in state.available_collections {
@@ -685,7 +635,7 @@ run_collection_selector :: proc(state: ^State) {
 
 	// Top bar
 	top_corner := Vec2{0, 0}
-	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a collection")
+	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a collection", selected=true, selected_bg=COLOR_BG)
 }
 
 run_sample_selector :: proc(state: ^State) {
@@ -705,7 +655,9 @@ run_sample_selector :: proc(state: ^State) {
 		typing := &state.typing
 		typing.sample = &state.available_samples[state.sample_idx]
 		typing.started_time = rl.GetTime()
+		typing.completed = false
 		clear(&typing.typed)
+		set_cursor_pos(typing, 0, false)
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
 		state.view = .Collections
 	}
@@ -717,7 +669,10 @@ run_sample_selector :: proc(state: ^State) {
 	cursor_selected : Vec2
 	for phase in UI_PHASES {
 		if phase == .Draw {
-			cursor = { cursor_start.x, center.y - cursor_selected.y / 2 - font_size / 2 }
+			cursor = {
+				cursor_start.x,
+				cursor_start.y + center.y - cursor_selected.y - font_size / 2
+			}
 		}
 
 		for &sample, idx in state.available_samples {
@@ -733,7 +688,7 @@ run_sample_selector :: proc(state: ^State) {
 
 	// Top bar
 	top_corner := Vec2{0, 0}
-	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a sample")
+	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
 }
 
 draw_centered_label :: proc(
@@ -743,6 +698,7 @@ draw_centered_label :: proc(
 	font_size: f32,
 	name: string,
 	selected := false,
+	selected_bg := COLOR_BG2,
 	width: f32 = -1
 ) -> Vec2 {
 	width := width
@@ -752,7 +708,7 @@ draw_centered_label :: proc(
 
 	if selected {
 		if phase == .Draw {
-			rl.DrawRectangleV(cursor + { -width / 2, 0 }, {width, font_size}, COLOR_BG2)
+			rl.DrawRectangleV(cursor + { -width / 2, 0 }, {width, font_size}, selected_bg)
 		}
 	}
 
@@ -786,3 +742,144 @@ run_completed :: proc(state: ^State) {
 	}
 }
 
+DrawLineResult :: struct {
+	start_caret_at, end_caret_at : Vec2,
+	set_start, set_end: bool,
+
+	cursor : Vec2,
+	idx    : int,
+
+	all_right  : bool,
+}
+
+draw_text_row :: proc(
+	phase: UiPhase,
+	typing: ^TypingState,
+	start,
+	to_draw: int,
+	cursor: Vec2,
+	font_size: f32,
+	vertical_spacing: f32,
+	spacing: f32,
+	row_offset: Vec2,
+	window_size: Vec2,
+	draw_target_row: bool,
+) -> (result: DrawLineResult) {
+	cursor_start := cursor
+
+	cursor := cursor
+
+	result.all_right = true
+
+	for idx in start..<to_draw {
+		result.idx = idx + 1
+
+		char, has_char          := char_ok(typing.typed[:], idx)
+		target_char, has_target := char_ok(typing.sample.text, idx)
+
+		target_is_newline := target_char == '\n'
+		is_newline        := char == '\n'
+
+		is_wrong := has_char && has_target && target_char != char
+		if is_wrong || !has_char {
+			result.all_right = false
+		}
+
+		NEWLINE_STR :: "\\n"
+
+		width : f32
+		if target_is_newline || is_newline {
+			width = draw_text(.Measure, {}, font_size, COLOR_FG, "%v", NEWLINE_STR)
+		} else {
+			target_width := draw_text(.Measure, cursor, font_size, COLOR_BG, "%c", target_char)
+			char_width   := !has_char ? target_width : draw_text(.Measure, cursor, font_size, COLOR_BG, "%c", char)
+			width        = math.max(char_width, target_width)
+		}
+
+		if cursor.x + width > window_size.x {
+			// NOTE: Update the other place as well
+			// Wrap the text - the current line has overflowed
+			cursor.x = cursor_start.x
+			cursor.y += row_offset.y
+			if draw_target_row {
+				cursor.y += row_offset.y
+			}
+		}
+
+		{
+			cursor := cursor
+
+			// Target text
+			if draw_target_row {
+				if phase == .Draw {
+					text_col := COLOR_TARGET
+					if is_wrong {
+						text_col = COLOR_BG
+					}
+
+					if is_wrong {
+						draw_letter_highlight(cursor, width, spacing, vertical_spacing, font_size, COLOR_WRONG)
+					}
+
+					if target_is_newline {
+						if is_wrong {
+							draw_text(.Draw, cursor, font_size, text_col, NEWLINE_STR)
+						}
+					} else {
+						draw_text(.Draw, cursor, font_size, text_col, "%c", target_char)
+					}
+				}
+
+				cursor += row_offset
+			}
+
+			if idx == typing.range.start {
+				result.start_caret_at, result.set_start = cursor, true
+			}
+			if idx == typing.range.end {
+				result.end_caret_at, result.set_end = cursor, true
+			}
+
+			// Typed text
+			{
+				if phase == .Draw {
+					lo, hi         := get_lo_hi(typing.range)
+					is_highlighted := lo <= idx && idx < hi
+
+					text_col := COLOR_FG
+					if is_highlighted {
+						text_col = COLOR_BG
+					}
+
+					if is_highlighted {
+						draw_letter_highlight(cursor, width, spacing, vertical_spacing, font_size, COLOR_HIGHLIGHT)
+					}
+
+					if is_newline {
+						if is_wrong {
+							draw_text(.Draw, cursor, font_size, text_col, NEWLINE_STR)
+						}
+					} else {
+						draw_text(.Draw, cursor, font_size, text_col, "%c", char)
+					}
+				}
+			}
+		}
+
+		cursor.x += width + spacing
+		if target_is_newline {
+			// NOTE: Update the other place as well
+			// Wrap the text - newline
+			cursor.x = cursor_start.x
+			cursor.y += row_offset.y
+			if draw_target_row {
+				cursor.y += row_offset.y
+			}
+			break;
+		}
+	}
+
+	result.cursor = cursor
+
+	return
+}
