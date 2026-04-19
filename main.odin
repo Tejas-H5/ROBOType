@@ -1,5 +1,8 @@
 package main
 
+import "core:path/slashpath"
+import "core:fmt"
+import "core:strconv"
 import "core:slice"
 import "core:strings"
 import "core:os"
@@ -9,8 +12,11 @@ import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
 
-ANIMATE_SPEED :: 1000
+ANIMATE_SPEED           :: 400
 IS_DEBUGGING_COMPLETION :: true
+IS_DEBUGGING_NEW_RECORD :: true
+
+// TODO: remove asserts from the main path
 
 View :: enum {
 	Collections,
@@ -30,6 +36,7 @@ State :: struct {
 	available_collections : [dynamic]Collection,
 	collection_idx        : int,
 
+	loaded_collection : ^Collection,
 	available_samples : [dynamic]Sample,
 	sample_idx : int,
 
@@ -37,8 +44,13 @@ State :: struct {
 }
 
 Collection :: struct {
-	name: string,
-	fullpath: string,
+	name     : string,
+	fullpath : string,
+}
+
+CollectionProgressEntry :: struct {
+	sample        : string,
+	personal_best : f32, // seconds
 }
 
 TypingState :: struct {
@@ -64,15 +76,18 @@ TypingState :: struct {
 	// This is especially the case in the puzzle levels, that will rely heavily on moving the
 	// cursor around and copy-pasting stuff. 
 	started_time  : f64,
-	finished_time : f64,
+	duration : f32,
+	prev_duration : f32,
 	completed : bool,
 	animation_t : f32,
+	animation_new_record : f32,
 	animation_zig: bool,
 }
 
 Sample :: struct {
 	name: string,
 	text: []byte,
+	personal_best: f32,
 }
 
 SelectionRange :: struct { start, end: int }
@@ -150,7 +165,15 @@ load_game_state :: proc() -> ^State {
 
 	if IS_DEBUGGING_COMPLETION {
 		// Airdrop ourselves right to the end
-		load_collection(state, "./collections/puzzles/")
+		idx : int = -1
+		for collection, i in state.available_collections {
+			if collection.name == "puzzles" {
+				idx = i
+			}
+		}
+		assert(idx != -1)
+
+		load_collection(state, &state.available_collections[idx])
 		start_typing(state)
 		n := len(state.typing.sample.text)
 		for char, idx in state.typing.sample.text {
@@ -163,19 +186,21 @@ load_game_state :: proc() -> ^State {
 	return state
 }
 
-load_collection :: proc(state: ^State, collection_path: string) {
-	defer free_all(context.temp_allocator)
-
-	files, err := os.read_all_directory_by_path(collection_path, context.temp_allocator)
+load_collection :: proc(state: ^State, collection: ^Collection) {
+	files, err := os.read_all_directory_by_path(collection.fullpath, context.allocator)
 	assert(err == nil)
+	defer delete(files)
 
 	sb := make([dynamic]byte)
 	defer delete(sb)
+
+	state.loaded_collection = collection
 
 	clear(&state.available_samples)
 	for file in files {
 		if file.type != .Regular {continue}
 
+		defer free_all(context.temp_allocator)
 		text, err := os.read_entire_file_from_path(file.fullpath, context.temp_allocator)
 		assert(err == nil)
 
@@ -203,6 +228,9 @@ load_collection :: proc(state: ^State, collection_path: string) {
 			name = strings.clone(file.name),
 			text = slice.clone(sb[:]),
 		}
+
+		// Also check for a progress file, and load whatever we put in that
+		load_progress(collection, &sample)
 
 		append(&state.available_samples, sample)
 	}
@@ -249,10 +277,11 @@ run_game :: proc(state: ^State) {
 run_typing :: proc(state: ^State) {
 	typing := &state.typing
 
-	if typing.sample == nil {return}
+	if typing.sample == nil           {return}
+	if state.loaded_collection == nil {return}
 
 	// Input
-	{
+	if !typing.completed {
 		// TODO: Moving up and down lines! (hard feature)
 		// TODO: Tab
 		// TODO: VIM bindings support
@@ -347,7 +376,8 @@ run_typing :: proc(state: ^State) {
 			type_char(typing, '\n')
 		}
 
-		mutated := prev_len != len(typing.typed)
+		curr_len := len(typing.typed)
+		mutated  := prev_len != curr_len
 		selection_changed := typing.range.end != prev_end
 
 		if mutated || selection_changed {
@@ -359,6 +389,10 @@ run_typing :: proc(state: ^State) {
 		}
 
 		if mutated {
+			if prev_len == 0 && curr_len > 0 {
+				typing.started_time = rl.GetTime()
+			}
+
 			if len(typing.typed) == len(typing.sample.text) {
 				all_correct := true
 				for idx in 0..<len(typing.typed) {
@@ -368,11 +402,29 @@ run_typing :: proc(state: ^State) {
 					}
 				}
 
-				if all_correct {
-					typing.completed     = true
-					typing.finished_time = rl.GetTime()
+				if all_correct && !typing.completed {
+					typing.completed   = true
 					typing.animation_t = 0
+
+					typing.prev_duration = typing.sample.personal_best
+					typing.duration      = f32(rl.GetTime() - typing.started_time)
+					if typing.prev_duration == 0 || typing.duration < typing.prev_duration {
+						typing.sample.personal_best = typing.duration
+						// save progress
+						save_progress(state.loaded_collection, typing.sample)
+						free_all(context.temp_allocator)
+					}
 				}
+			}
+		}
+	} else if typing.completed {
+		if rlIsKeyPressedOrRepeated(.ENTER) {
+			n := len(state.available_samples)
+			if state.sample_idx < n - 1 {
+				state.sample_idx += 1
+				start_typing(state)
+			} else {
+				state.view = .Samples
 			}
 		}
 	}
@@ -396,6 +448,7 @@ run_typing :: proc(state: ^State) {
 
 	start_caret_at, end_caret_at : Vec2
 	cursor := cursor_start
+	document_height : f32
 	for phase in UI_PHASES { 
 		cursor = cursor_start
 		if phase == .Draw {
@@ -443,6 +496,8 @@ run_typing :: proc(state: ^State) {
 		if !set_end   { end_caret_at = cursor + row_offset }
 
 		if phase == .Measure {
+			document_height = cursor.y
+
 			if !typing.completed {
 				// Make sure that the 'camera' starts at this character.
 				start := -start_caret_at + 6 * (character_width + spacing)
@@ -460,6 +515,7 @@ run_typing :: proc(state: ^State) {
 				} else {
 					typing.offset_smooth = offset
 				}
+
 			} else {
 				typing.offset_smooth = {0, typing.animation_t}
 			}
@@ -467,13 +523,12 @@ run_typing :: proc(state: ^State) {
 	}
 	typing.start_caret_at = start_caret_at
 	typing.end_caret_at = end_caret_at
-	document_height := cursor.y 
 
 	if typing.completed {
 		// Admire the view
 
-		target_a := -window_size.y / 2
-		target_b := document_height + 2 * window_size.y
+		target_a := -window_size.y * 0.1
+		target_b := math.max(0, document_height - window_size.y + window_size.y * 0.1)
 
 		if typing.animation_zig {
 			typing.animation_t += dt * ANIMATE_SPEED
@@ -516,17 +571,52 @@ run_typing :: proc(state: ^State) {
 
 		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", typing.sample.name)
 
-		cursor.x += font_size // NOTE: font_size is a vertical unit, so it's strange to use it horizontally. it'll do for now
+		duration : f32
+		if typing.completed {
+			duration = typing.duration
+		} else if len(typing.typed) > 0 {
+			duration = f32(rl.GetTime() - typing.started_time)
+		}
+
+		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | time: %.3f", duration)
 	}
 
 	if typing.completed {
-		duration := typing.finished_time - typing.started_time
-
-		font_size    := window_size.y * 0.05
+		font_size := window_size.y * 0.05
 		
 		cursor := Vec2{0, 0}
-		rl.DrawRectangleV(cursor, {window_size.x, font_size}, COLOR_BG)
-		draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, duration)
+		height := 2 * font_size
+		if typing.prev_duration != 0 {
+			height += font_size
+		}
+		rl.DrawRectangleV(cursor, {window_size.x, height}, COLOR_BG)
+		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, typing.duration)
+
+		if typing.duration < typing.prev_duration {
+			col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
+			typing.animation_new_record += dt * 1000
+			cursor.x += draw_text(.Draw, cursor, font_size, col, "New record!!!")
+		}
+
+		cursor.x = 0
+		cursor.y += font_size
+
+		if typing.prev_duration != 0 {
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "Your old time was %.3f seconds.", typing.prev_duration)
+			cursor.x += 50
+
+
+			cursor.x = 0
+			cursor.y += font_size
+		}
+
+		n := len(state.available_samples)
+		if state.sample_idx < n - 1 {
+			next_sample := state.available_samples[state.sample_idx + 1]
+			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] to go to the next sample - %v", next_sample.name)
+		} else {
+			draw_text(.Draw, cursor, font_size, COLOR_FG, "You've completed the collection! [Enter] to go back")
+		}
 	}
 
 	switch {
@@ -662,7 +752,7 @@ run_collection_selector :: proc(state: ^State) {
 	case rlIsKeyPressedOrRepeated(.DOWN): state.collection_idx += 1
 	case rlIsKeyPressedOrRepeated(.UP):   state.collection_idx -= 1
 	case rlIsKeyPressedOrRepeated(.ENTER): 
-		load_collection(state, state.available_collections[state.collection_idx].fullpath)
+		load_collection(state, &state.available_collections[state.collection_idx])
 		state.view = .Samples
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
 		state.requested_quit = true
@@ -922,4 +1012,52 @@ draw_text_row :: proc(
 	result.cursor = cursor
 
 	return
+}
+
+pull_float :: proc(str: ^string) -> (val: f32, ok: bool) {
+	val_str := strings.split_iterator(str, ",") or_return
+
+	val_str = strings.trim_space(val_str)
+	val, ok  = strconv.parse_f32(val_str)
+
+	return
+}
+
+load_progress :: proc(collection: ^Collection, sample: ^Sample) {
+	progress_path := slashpath.join({".", "progress", collection.name, sample.name}, context.temp_allocator)
+
+	progress_text_bytes, err := os.read_entire_file_from_path(progress_path, context.temp_allocator)
+	if err != .FILE_NOT_FOUND && err != .Not_Exist && err != nil {
+		debug_log("load error %v", err)
+		return
+	}
+
+	progress_text := string(progress_text_bytes)
+	personal_best, ok := pull_float(&progress_text)
+	if ok {
+		sample.personal_best = personal_best
+		debug_log("loaded pb %v", personal_best)
+	}
+}
+
+save_progress :: proc(collection: ^Collection, sample: ^Sample) {
+	debug_log("saving new pb: %v, %v", sample.name, sample.personal_best)
+
+	if IS_DEBUGGING_NEW_RECORD {return}
+
+	progress_path := slashpath.join({".", "progress", collection.name, sample.name}, context.temp_allocator)
+	progress_dir  := slashpath.dir(progress_path, context.temp_allocator)
+
+	{
+		err := os.make_directory_all(progress_dir)
+		if err != nil {return}
+	}
+
+	{
+		err := os.write_entire_file_from_string(
+			progress_path,
+			fmt.aprintf("%v", sample.personal_best, allocator=context.temp_allocator),
+		)
+		if err != nil {return}
+	}
 }
