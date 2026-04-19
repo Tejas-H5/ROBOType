@@ -9,6 +9,9 @@ import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
 
+ANIMATE_SPEED :: 1000
+IS_DEBUGGING_COMPLETION :: true
+
 View :: enum {
 	Collections,
 	Samples,
@@ -63,6 +66,8 @@ TypingState :: struct {
 	started_time  : f64,
 	finished_time : f64,
 	completed : bool,
+	animation_t : f32,
+	animation_zig: bool,
 }
 
 Sample :: struct {
@@ -137,10 +142,23 @@ load_game_state :: proc() -> ^State {
 
 	// The truetype font as loaded by RayLib looks like ass for some reason. 
 	// Manually converting it to a bitmap font does not help.
+	// Not solved yet. 
 	font = rl.LoadFontEx("./font/IBMPlexMono-Regular.ttf", 64, nil, 250)
 	// rl.SetTextureFilter(font.texture, .POINT)
 
 	load_available_collections(state)
+
+	if IS_DEBUGGING_COMPLETION {
+		// Airdrop ourselves right to the end
+		load_collection(state, "./collections/puzzles/")
+		start_typing(state)
+		n := len(state.typing.sample.text)
+		for char, idx in state.typing.sample.text {
+			if idx == n -1 {break}
+			append(&state.typing.typed, char)
+		}
+		set_cursor_pos(&state.typing, n, false)
+	}
 
 	return state
 }
@@ -351,8 +369,9 @@ run_typing :: proc(state: ^State) {
 				}
 
 				if all_correct {
-					state.view = .Completed
+					typing.completed     = true
 					typing.finished_time = rl.GetTime()
+					typing.animation_t = 0
 				}
 			}
 		}
@@ -376,8 +395,9 @@ run_typing :: proc(state: ^State) {
 	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
 
 	start_caret_at, end_caret_at : Vec2
+	cursor := cursor_start
 	for phase in UI_PHASES { 
-		cursor := cursor_start
+		cursor = cursor_start
 		if phase == .Draw {
 			// TODO: camera offset
 			cursor -= typing.offset_smooth
@@ -423,26 +443,52 @@ run_typing :: proc(state: ^State) {
 		if !set_end   { end_caret_at = cursor + row_offset }
 
 		if phase == .Measure {
-			// Make sure that the 'camera' starts at this character.
-			start := -start_caret_at + 6 * (character_width + spacing)
-			end   := -end_caret_at   + 6 * (character_width + spacing)
+			if !typing.completed {
+				// Make sure that the 'camera' starts at this character.
+				start := -start_caret_at + 6 * (character_width + spacing)
+				end   := -end_caret_at   + 6 * (character_width + spacing)
 
-			offset : Vec2
-			point_where_we_should_start_scrolling := center.y
-			if end_caret_at.y > point_where_we_should_start_scrolling {
-				offset.y = end_caret_at.y - point_where_we_should_start_scrolling
-			}
+				offset : Vec2
+				point_where_we_should_start_scrolling := center.y
+				if end_caret_at.y > point_where_we_should_start_scrolling {
+					offset.y = end_caret_at.y - point_where_we_should_start_scrolling
+				}
 
-			if typing.is_animated {
-				t := 50 * dt
-				typing.offset_smooth = linalg.lerp(typing.offset_smooth, offset, t)
+				if typing.is_animated {
+					t := 50 * dt
+					typing.offset_smooth = linalg.lerp(typing.offset_smooth, offset, t)
+				} else {
+					typing.offset_smooth = offset
+				}
 			} else {
-				typing.offset_smooth = offset
+				typing.offset_smooth = {0, typing.animation_t}
 			}
 		}
 	}
 	typing.start_caret_at = start_caret_at
 	typing.end_caret_at = end_caret_at
+	document_height := cursor.y 
+
+	if typing.completed {
+		// Admire the view
+
+		target_a := -window_size.y / 2
+		target_b := document_height + 2 * window_size.y
+
+		if typing.animation_zig {
+			typing.animation_t += dt * ANIMATE_SPEED
+			if typing.animation_t > target_b {
+				typing.animation_t = target_b
+				typing.animation_zig = !typing.animation_zig
+			}
+		} else {
+			typing.animation_t -= dt * ANIMATE_SPEED
+			if typing.animation_t < target_a {
+				typing.animation_t = target_a
+				typing.animation_zig = !typing.animation_zig
+			}
+		}
+	}
 
 	BLINK_TIME :: 1.0
 	if typing.blink_time > BLINK_TIME {
@@ -471,6 +517,16 @@ run_typing :: proc(state: ^State) {
 		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", typing.sample.name)
 
 		cursor.x += font_size // NOTE: font_size is a vertical unit, so it's strange to use it horizontally. it'll do for now
+	}
+
+	if typing.completed {
+		duration := typing.finished_time - typing.started_time
+
+		font_size    := window_size.y * 0.05
+		
+		cursor := Vec2{0, 0}
+		rl.DrawRectangleV(cursor, {window_size.x, font_size}, COLOR_BG)
+		draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, duration)
 	}
 
 	switch {
@@ -638,6 +694,16 @@ run_collection_selector :: proc(state: ^State) {
 	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a collection", selected=true, selected_bg=COLOR_BG)
 }
 
+start_typing :: proc(state: ^State) {
+	state.view = .Typing
+	typing := &state.typing
+	typing.sample = &state.available_samples[state.sample_idx]
+	typing.started_time = rl.GetTime()
+	typing.completed = false
+	clear(&typing.typed)
+	set_cursor_pos(typing, 0, false)
+}
+
 run_sample_selector :: proc(state: ^State) {
 	if len(state.available_samples) == 0 { return }
 
@@ -651,13 +717,7 @@ run_sample_selector :: proc(state: ^State) {
 	case rlIsKeyPressedOrRepeated(.DOWN): state.sample_idx += 1
 	case rlIsKeyPressedOrRepeated(.UP):   state.sample_idx -= 1
 	case rlIsKeyPressedOrRepeated(.ENTER): 
-		state.view = .Typing
-		typing := &state.typing
-		typing.sample = &state.available_samples[state.sample_idx]
-		typing.started_time = rl.GetTime()
-		typing.completed = false
-		clear(&typing.typed)
-		set_cursor_pos(typing, 0, false)
+		start_typing(state)
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
 		state.view = .Collections
 	}
@@ -720,26 +780,6 @@ draw_centered_label :: proc(
 }
 
 run_completed :: proc(state: ^State) {
-	typing := &state.typing
-
-	duration := typing.finished_time - typing.started_time
-
-	window_size := state.size
-	center      := window_size / 2
-
-	font_size    := window_size.y * 0.05
-	spacing      := font_size / 10
-	vertical_spacing := font_size / 5
-	
-	rl.ClearBackground(COLOR_BG)
-
-	cursor := Vec2{0, 0}
-	draw_text(.Draw, cursor, font_size, COLOR_FG, "Completed in %.3f seconds!", duration)
-
-	switch{
-	case rlIsKeyPressedOrRepeated(.ESCAPE):
-		state.view = .Collections
-	}
 }
 
 DrawLineResult :: struct {
