@@ -1,0 +1,31 @@
+I've tried a bunch of typing practice programs over the years, none of them handle mistakes very well.
+In an ideal world, the input field they give you should closely resemble the input field that you actually use day to day.
+This idea, pushed to it's logical limit, would result in a series of samples, with online leaderboards showing how quickly someone was able to complete it.
+
+---
+
+Here's a quick tutorial for the uninformed.
+
+Assuming you know how to type, here are some things you may _not_ have known about:
+
+Arrow keys to navigate around the text.
+Home to navigate to the start of the line.
+End to navigate to the end of the line.
+Ctrl + Arrows to move one word at a time.
+Ctrl + Backspace to delete the last word.
+Ctrl + Delete to delete the _next_ word.
+Shift + any movement to range select.
+Ctrl+W to delete the last word (Warning: don't use this in the browser).
+
+I've added some other common bindings that aren't a part of normal OS textboxes, but are fairly common in many IDEs and terminals:
+
+Those of you with those smaller keyboards that don't have HOME/END: sucks to be you.
+
+The plan is to add VIM binding someday, so that we can finally figure out if vim is truly faster.
+They are very expansive though, so it may never happen.
+
+---
+
+You can add your own collections in the /collections folder.
+
+glhf

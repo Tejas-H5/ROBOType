@@ -1,7 +1,0 @@
-I've tried a bunch of typing practice programs over the years, none of them handle mistakes very well.
-
-I think that the input field should be very similar to a regular text field you would interact with in an OS text box, and your goal is to just make the current text match the target text using all the same facilities that an OS textfield would give you.
-
-This idea, pushed to it's logical limit, would result in a series of examples, with online leaderboards showing how quickly someone was able to complete it. 
-
-We can finally figure out if Vim is actually better xD.

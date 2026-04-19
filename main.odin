@@ -1,5 +1,6 @@
 package main
 
+import "core:unicode/utf8/utf8string"
 import "core:slice"
 import "core:strings"
 import "core:os"
@@ -13,6 +14,7 @@ View :: enum {
 	Collections,
 	Samples,
 	Typing,
+	Completed,
 }
 
 State :: struct {
@@ -51,6 +53,15 @@ TypingState :: struct {
 	offset_smooth : Vec2,
 	start_caret_at, end_caret_at : Vec2,
 	is_animated                  : bool,
+
+	// NOTE: I actually don't care about the number of types I typed the wrong thing - 
+	// Really, I just want to minimize the time. If the most optimal typing strategy actually
+	// invovles making shittone of mistakes and then editing them later, I don't want to be 
+	// penalized for getting one or two letters wrong actually.
+	// This is especially the case in the puzzle levels, that will rely heavily on moving the
+	// cursor around and copy-pasting stuff. 
+	started_time  : f64,
+	finished_time : f64,
 }
 
 Sample :: struct {
@@ -122,11 +133,10 @@ load_available_collections :: proc(state: ^State) {
 load_game_state :: proc() -> ^State {
 	state := new(State)
 
+	state.view = .Collections
+
 	load_available_collections(state)
-	// if len(state.available_collections) > 0 {
-	// 	load_collection(state, state.available_collections[0].fullpath)
-	// }
-	//
+
 	return state
 }
 
@@ -209,16 +219,15 @@ run_game :: proc(state: ^State) {
 	switch state.view {
 	case .Collections: run_collection_selector(state)
 	case .Samples:     run_sample_selector(state)
-	case .Typing:      run_typing(state, &state.typing)
+	case .Typing:      run_typing(state)
+	case .Completed:   run_completed(state)
 	}
 }
 
-run_typing :: proc(state: ^State, typing: ^TypingState) {
-	if typing.sample == nil {return}
+run_typing :: proc(state: ^State) {
+	typing := &state.typing
 
-	switch {
-	case rlIsKeyPressedOrRepeated(.ESCAPE): state.view = .Samples
-	}
+	if typing.sample == nil {return}
 
 	// Input
 	{
@@ -325,6 +334,23 @@ run_typing :: proc(state: ^State, typing: ^TypingState) {
 			// state.is_animated = !mutated
 			typing.is_animated = true
 			typing.blink_time  = 0
+		}
+
+		if mutated {
+			if len(typing.typed) == len(typing.sample.text) {
+				all_correct := true
+				for idx in 0..<len(typing.typed) {
+					if typing.typed[idx] != typing.sample.text[idx] {
+						all_correct = false
+						break;
+					}
+				}
+
+				if all_correct {
+					state.view = .Completed
+					typing.finished_time = rl.GetTime()
+				}
+			}
 		}
 	}
 
@@ -497,8 +523,11 @@ run_typing :: proc(state: ^State, typing: ^TypingState) {
 
 		cursor.x += font_size // NOTE: font_size is a vertical unit, so it's strange to use it horizontally. it'll do for now
 	}
-}
 
+	switch {
+	case rlIsKeyPressedOrRepeated(.ESCAPE): state.view = .Samples
+	}
+}
 
 LetterType :: enum {
 	Other,
@@ -514,8 +543,16 @@ get_letter_type :: proc(b: byte) -> LetterType {
 	if r == '\n' {return .Newline}
 	if r == ' '  {return .Whitespace }
 
-	if unicode.is_punct(r)  {return .Punctuation}
 	if unicode.is_letter(r) {return .Letter}
+	if unicode.is_alpha(r) {return .Letter}
+
+	switch r {
+	case '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '-', '=', '[', ']', '\\', '{',
+		'}', '|', ';', '\'', ':', '"', ',', '.', '/', '<', '>', '?': 
+		return .Punctuation
+	}
+
+	debug_log("other: %v", r)
 
 	return .Other
 }
@@ -664,8 +701,11 @@ run_sample_selector :: proc(state: ^State) {
 	case rlIsKeyPressedOrRepeated(.DOWN): state.sample_idx += 1
 	case rlIsKeyPressedOrRepeated(.UP):   state.sample_idx -= 1
 	case rlIsKeyPressedOrRepeated(.ENTER): 
-		state.typing.sample = &state.available_samples[state.sample_idx]
 		state.view = .Typing
+		typing := &state.typing
+		typing.sample = &state.available_samples[state.sample_idx]
+		typing.started_time = rl.GetTime()
+		clear(&typing.typed)
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
 		state.view = .Collections
 	}
@@ -696,7 +736,15 @@ run_sample_selector :: proc(state: ^State) {
 	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a sample")
 }
 
-draw_centered_label :: proc(state: ^State, phase: UiPhase, cursor: Vec2, font_size: f32, name: string, selected := false, width: f32 = -1) -> Vec2 {
+draw_centered_label :: proc(
+	state: ^State,
+	phase: UiPhase,
+	cursor: Vec2,
+	font_size: f32,
+	name: string,
+	selected := false,
+	width: f32 = -1
+) -> Vec2 {
 	width := width
 	if width < 0 {
 		width = draw_text(.Measure, cursor, font_size, COLOR_FG, "%v", name)
@@ -715,4 +763,26 @@ draw_centered_label :: proc(state: ^State, phase: UiPhase, cursor: Vec2, font_si
 	return {width, font_size}
 }
 
+run_completed :: proc(state: ^State) {
+	typing := &state.typing
+
+	duration := typing.finished_time - typing.started_time
+
+	window_size := state.size
+	center      := window_size / 2
+
+	font_size    := window_size.y * 0.05
+	spacing      := font_size / 10
+	vertical_spacing := font_size / 5
+	
+	rl.ClearBackground(COLOR_BG)
+
+	cursor := Vec2{0, 0}
+	draw_text(.Draw, cursor, font_size, COLOR_FG, "Completed in %.3f seconds!", duration)
+
+	switch{
+	case rlIsKeyPressedOrRepeated(.ESCAPE):
+		state.view = .Collections
+	}
+}
 
