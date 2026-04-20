@@ -12,9 +12,10 @@ import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
 
-ANIMATE_SPEED           :: 400
-IS_DEBUGGING_COMPLETION :: true
-IS_DEBUGGING_NEW_RECORD :: true
+ANIMATE_SPEED            :: 400
+IS_DEBUGGING_COMPLETION  :: false
+IS_DEBUGGING_NEW_RECORD  :: false
+IS_DEBUGGING_UNDO_BUFFER :: true
 
 // TODO: remove asserts from the main path
 
@@ -53,12 +54,21 @@ CollectionProgressEntry :: struct {
 	personal_best : f32, // seconds
 }
 
+UndoEntry :: struct {
+	idx    : int,
+	value  : []byte,
+	insert : bool,
+}
+
 TypingState :: struct {
 	sample: ^Sample,
 
 	// NOTE: make sure that the font is monospace, so that we can display the
 	// target letter right above what was actually typed, without any letter spacing issues
-	typed      : [dynamic]byte,
+	typed       : [dynamic]byte,
+	copied      : [dynamic]byte,
+	undo_buffer : [dynamic]^UndoEntry, // Potential candidate for an arena allocator.
+	undo_idx   : int,
 	range      : SelectionRange,
 	blink_time : f32,
 
@@ -242,20 +252,75 @@ load_collection :: proc(state: ^State, collection: ^Collection) {
 	return
 }
 
+// truncates the undo buffer, and appends a new entry
+make_undo_entry :: proc(typing: ^TypingState, idx: int, value: []u8, insert: bool) {
+	for i in typing.undo_idx+1..<len(typing.undo_buffer) {
+		delete_undo_entry(typing.undo_buffer[i])
+	}
+	resize(&typing.undo_buffer, typing.undo_idx)
+
+	undo_entry := new_clone(UndoEntry{
+		idx=idx,
+		value=slice.clone(value),
+		insert=insert,
+	})
+	append(&typing.undo_buffer, undo_entry)
+	typing.undo_idx += 1
+
+	if insert {
+		debug_log("logging insert %v", string(value))
+	} else {
+		debug_log("logging delete %v", string(value))
+	}
+
+	if IS_DEBUGGING_UNDO_BUFFER {
+		debug_log("-------------")
+		for entry in typing.undo_buffer {
+			debug_log("idx=%v, value= %v, insert=%v", entry.idx, string(entry.value), entry.insert)
+		}
+	}
+}
+
+delete_undo_entry :: proc(entry: ^UndoEntry) {
+	if entry != nil {
+		delete(entry.value)
+	}
+}
+
 Color :: rl.Color
 Vec2  :: rl.Vector2
 Font  :: rl.Font
 
-delete_selected :: proc(state: ^TypingState) -> bool {
-	if state.range.start == state.range.end  {return false}
+delete_text :: proc(typing: ^TypingState, range: SelectionRange, is_undo := false) -> bool {
+	n := len(typing.typed)
+	range := range
+	range.start = math.clamp(range.start, 0, n)
+	range.end   = math.clamp(range.end, 0, n)
 
-	lo, hi := get_lo_hi(state.range)
-	remove_range(&state.typed, lo, hi)
+	if range.start == range.end  {return false}
 
-	state.range.end   = lo
-	state.range.start = state.range.end
+	lo, hi := get_lo_hi(range)
+
+	if !is_undo {
+		make_undo_entry(typing, lo, typing.typed[lo:hi], insert=false)
+	}
+
+	remove_range(&typing.typed, lo, hi)
+	set_cursor_pos(typing, lo, false)
 
 	return true
+}
+
+delete_selected :: proc(typing: ^TypingState) -> bool {
+	return delete_text(typing, typing.range)
+}
+
+insert_text :: proc(typing: ^TypingState, idx: int,  val: []byte, is_undo := false) {
+	if !is_undo {
+		make_undo_entry(typing, idx, val, insert=true)
+	}
+	inject_at_elems(&typing.typed, idx, ..val)
+	set_cursor_pos(typing, idx + len(val), false)
 }
 
 get_lo_hi :: proc(range: SelectionRange) -> (int, int) {
@@ -286,8 +351,11 @@ run_typing :: proc(state: ^State) {
 		// TODO: Tab
 		// TODO: VIM bindings support
 
-		is_range_selecting := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
-		is_moving_by_word  := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+		shift_down := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+		ctrl_down  := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+
+		is_range_selecting := shift_down
+		is_moving_by_word  := ctrl_down
 		remove_last_word := is_moving_by_word && rlIsKeyPressedOrRepeated(.W)
 
 		prev_end := typing.range.end
@@ -378,19 +446,64 @@ run_typing :: proc(state: ^State) {
 
 			set_cursor_pos(typing, pos, is_range_selecting)
 		}
+		if ctrl_down && rlIsKeyPressedOrRepeated(.C) {
+			clear(&typing.copied)
+			lo, hi := get_lo_hi(typing.range)
+			for idx in lo..<hi {
+				append(&typing.copied, typing.typed[idx])
+			}
+		}
+		if ctrl_down && rlIsKeyPressedOrRepeated(.V) {
+			delete_selected(typing)
+			start := typing.range.end
+			insert_text(typing, start, typing.copied[:])
+		}
+		if ctrl_down && !shift_down && rlIsKeyPressedOrRepeated(.Z) {
+			if typing.undo_idx > 0 {
+				typing.undo_idx -= 1
+
+				undo_entry := typing.undo_buffer[typing.undo_idx]
+				assert(undo_entry != nil)
+				if undo_entry.insert {
+					debug_log("deleting fr fr")
+					delete_text(typing, {undo_entry.idx, undo_entry.idx + len(undo_entry.value)}, is_undo = true)
+				} else {
+					debug_log("inserting. wtf")
+					insert_text(typing, undo_entry.idx, undo_entry.value, is_undo = true)
+				}
+			}
+		}
+		if (ctrl_down && rlIsKeyPressedOrRepeated(.R)) || (ctrl_down && shift_down && rlIsKeyPressedOrRepeated(.Z)) {
+			n := len(typing.undo_buffer)
+			if typing.undo_idx < n {
+				undo_entry := typing.undo_buffer[typing.undo_idx]
+				assert(undo_entry != nil)
+				if undo_entry.insert {
+					debug_log("inserting fr fr")
+					insert_text(typing, undo_entry.idx, undo_entry.value, is_undo = true)
+				} else {
+					debug_log("deleting wt")
+					delete_text(typing, {undo_entry.idx, undo_entry.idx + len(undo_entry.value)}, is_undo = true)
+				}
+
+				typing.undo_idx += 1
+			}
+		}
+		if ctrl_down && rlIsKeyPressedOrRepeated(.A) {
+			set_cursor_pos(typing, 0, false)
+			set_cursor_pos(typing, len(typing.sample.text), true)
+		}
 
 		if rlIsKeyPressedOrRepeated(.BACKSPACE) || remove_last_word {
 			if !delete_selected(typing) {
 				if is_moving_by_word {
 					lo := move_cursor_prev_boundary(typing.range.end, typing.typed[:])
 					if lo != typing.range.end {
-						remove_range(&typing.typed, lo, typing.range.end)
-						set_cursor_pos(typing, lo, false)
+						delete_text(typing, {lo, typing.range.end})
 					}
 				} else {
 					if typing.range.end > 0 {
-						ordered_remove(&typing.typed, typing.range.end - 1)
-						set_cursor_pos(typing, typing.range.end - 1, false)
+						delete_text(typing, {typing.range.end - 1, typing.range.end})
 					}
 				}
 			}
@@ -401,11 +514,10 @@ run_typing :: proc(state: ^State) {
 				if is_moving_by_word {
 					hi := move_cursor_next_boundary(typing.range.end, typing.typed[:])
 					if hi != typing.range.end {
-						remove_range(&typing.typed, typing.range.end, hi)
-						set_cursor_pos(typing, typing.range.end, false)
+						delete_text(typing, {typing.range.end, hi})
 					}
 				} else {
-					ordered_remove(&typing.typed, typing.range.end)
+					delete_text(typing, {typing.range.end, typing.range.end + 1})
 				}
 			}
 		}
@@ -437,6 +549,13 @@ run_typing :: proc(state: ^State) {
 		}
 
 		if mutated {
+			if curr_len == 0 {
+				// Prevent typing everything but the final letter, then clearing all, resetting the timer, then pasting getting a sub-1 second time.
+				clear(&typing.copied)
+				// Same as above, but redoing a clear-all action instead of pasting
+				clear_undo_buffer(typing)
+			}
+
 			if prev_len == 0 && curr_len > 0 {
 				typing.started_time = rl.GetTime()
 			}
@@ -472,8 +591,11 @@ run_typing :: proc(state: ^State) {
 				state.sample_idx += 1
 				start_typing(state)
 			} else {
-				state.view = .Samples
+				state.view = .Collections
 			}
+		}
+		if rlIsKeyPressedOrRepeated(.R) {
+			start_typing(state)
 		}
 	}
 
@@ -603,7 +725,7 @@ run_typing :: proc(state: ^State) {
 		// touching the letters and also distribute the spacing nicely
 		cursor_width   := font_size / 10
 
-		rl.DrawRectangleV({ end_caret_at.x + cursor_width, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
+		rl.DrawRectangleV({ end_caret_at.x, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
 	}
 
 	// Status line
@@ -661,14 +783,19 @@ run_typing :: proc(state: ^State) {
 		n := len(state.available_samples)
 		if state.sample_idx < n - 1 {
 			next_sample := state.available_samples[state.sample_idx + 1]
-			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] to go to the next sample - %v", next_sample.name)
+			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> next sample - %v, [R] -> Restart", next_sample.name)
 		} else {
-			draw_text(.Draw, cursor, font_size, COLOR_FG, "You've completed the collection! [Enter] to go back")
+			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> collections, [R] -> Restart")
 		}
 	}
 
 	switch {
-	case rlIsKeyPressedOrRepeated(.ESCAPE): state.view = .Samples
+	case rl.IsKeyPressed(.ESCAPE): 
+		if typing.range.start != typing.range.end {
+			set_cursor_pos(typing, typing.range.end, false)
+		} else {
+			state.view = .Samples
+		}
 	}
 }
 
@@ -764,18 +891,16 @@ char_ok :: proc(text: []byte, idx: int) -> (byte, bool) {
 	return text[idx], true
 }
 
-type_char :: proc(state: ^TypingState, c: rune) {
-	delete_selected(state)
-
-	inject_at(&state.typed, state.range.end, byte(c))
-	set_cursor_pos(state, state.range.end + 1, false)
+type_char :: proc(typing: ^TypingState, c: rune) {
+	delete_selected(typing)
+	insert_text(typing, typing.range.end, []byte{ byte(c) })
 }
 
-set_cursor_pos :: proc(state: ^TypingState, pos: int, is_range_selecting: bool) {
-	pos := math.clamp(pos, 0, len(state.typed))
-	state.range.end = pos
+set_cursor_pos :: proc(typing: ^TypingState, pos: int, is_range_selecting: bool) {
+	pos := math.clamp(pos, 0, len(typing.typed))
+	typing.range.end = pos
 	if !is_range_selecting {
-		state.range.start = pos
+		typing.range.start = pos
 	}
 }
 
@@ -839,7 +964,19 @@ start_typing :: proc(state: ^State) {
 	typing.started_time = rl.GetTime()
 	typing.completed = false
 	clear(&typing.typed)
+	clear(&typing.copied)
+	clear_undo_buffer(typing)
 	set_cursor_pos(typing, 0, false)
+}
+
+clear_undo_buffer :: proc(typing: ^TypingState) {
+	// Initially I wanted to persist the copy buffer between sessions. But then what's stopping you from copying everything but 1,
+	// and pasting that back in on the next session? So yea, we gotta clear this too
+	for entry in typing.undo_buffer {
+		delete_undo_entry(entry)
+	}
+	clear(&typing.undo_buffer)
+	typing.undo_idx = 0
 }
 
 run_sample_selector :: proc(state: ^State) {
