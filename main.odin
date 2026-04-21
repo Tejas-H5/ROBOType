@@ -19,7 +19,7 @@ IS_DEBUGGING_UNDO_BUFFER :: true
 
 NEWLINE_STR :: "\\n"
 
-DRAW_MODE :: TextDrawMode.Rows
+DRAW_MODE :: TextDrawMode.Overlayed
 
 TextDrawMode :: enum {
 	Rows,
@@ -629,6 +629,8 @@ run_typing :: proc(state: ^State) {
 	cursor := cursor_start
 	document_height : f32
 
+	counter += 1
+
 	for phase in UI_PHASES { 
 		cursor = cursor_start
 		if phase == .Draw {
@@ -639,7 +641,7 @@ run_typing :: proc(state: ^State) {
 		result: DrawTextResult
 		switch DRAW_MODE {
 		case .Overlayed:
-			result = draw_text_overlayed(typing)
+			result = draw_text_overlayed(phase, typing, cursor, window_size)
 		case .Rows:
 			result = draw_text_rows(phase, typing, cursor, window_size)
 		}
@@ -1107,10 +1109,8 @@ draw_text_row :: proc(
 				if phase == .Draw {
 					draw_single_character_with_highlight(
 						cursor, target_char, tc, width, 
-						col         = COLOR_TARGET,
-						hi_col      = COLOR_BG,
-						hi_col_bg   = COLOR_WRONG,
-						highlighted = is_wrong,
+						col         = is_wrong ? COLOR_BG : COLOR_TARGET,
+						bg_col      = is_wrong ? COLOR_WRONG : {},
 						draw_newline = is_wrong,
 					)
 				}
@@ -1130,12 +1130,11 @@ draw_text_row :: proc(
 				if phase == .Draw {
 					lo, hi         := get_lo_hi(typing.range)
 					is_highlighted := lo <= idx && idx < hi
+
 					draw_single_character_with_highlight(
 						cursor, char, tc, width, 
-						col         = COLOR_FG,
-						hi_col      = COLOR_BG,
-						hi_col_bg   = COLOR_HIGHLIGHT,
-						highlighted = is_highlighted,
+						col         = is_highlighted ? COLOR_BG : COLOR_FG,
+						bg_col      = is_highlighted ? COLOR_HIGHLIGHT : {},
 						draw_newline = is_wrong,
 					)
 				}
@@ -1277,65 +1276,100 @@ draw_text_rows :: proc(phase: UiPhase, typing: ^TypingState, cursor_start: Vec2,
 	return 
 }
 
-draw_text_overlayed :: proc(typing: ^TypingState) -> (result: DrawTextResult) {
-	// cursor: Vec2
-	// chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
-	//
-	// font_size    := window_size.y * 0.05
-	// spacing      := f32(0) // font_size / 10
-	// vertical_spacing := font_size / 5
-	// row_offset   := Vec2{0, font_size + spacing}
-	//
-	// cursor = cursor_start
-	// if phase == .Draw {
-	// 	// TODO: camera offset
-	// 	cursor -= typing.offset_smooth
-	// }
-	//
-	// set_start, set_end : bool
-	// idx : int
-	// for idx < chars_to_draw {
-	// 	cursor_start := cursor
-	// 	row_result := draw_text_row(
-	// 		.Measure,
-	// 		typing, 
-	// 		idx, chars_to_draw,
-	// 		cursor_start,
-	// 		font_size, vertical_spacing, spacing, row_offset,
-	// 		window_size,
-	// 		draw_target_row = true
-	// 	)
-	// 	row_result = draw_text_row(
-	// 		phase,
-	// 		typing, 
-	// 		idx, chars_to_draw,
-	// 		cursor_start,
-	// 		font_size, vertical_spacing, spacing, row_offset,
-	// 		window_size,
-	// 		draw_target_row = !row_result.all_right
-	// 	)
-	//
-	// 	idx    = row_result.idx
-	// 	cursor = row_result.cursor
-	//
-	// 	if row_result.set_start {
-	// 		set_start = row_result.set_start
-	// 		result.start_caret_at = row_result.start_caret_at
-	// 	}
-	// 	if row_result.set_end {
-	// 		set_end = row_result.set_end
-	// 		result.end_caret_at = row_result.end_caret_at
-	// 	}
-	// }
-	//
-	// if !set_start { result.start_caret_at = cursor + row_offset }
-	// if !set_end   { result.end_caret_at = cursor + row_offset }
-	//
-	// result.cursor = cursor
-	//
-	// return 
+counter := 0
 
-	return
+draw_text_overlayed :: proc(phase: UiPhase, typing: ^TypingState, cursor: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
+	cursor := cursor
+	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
+
+	tc := create_text_config(0.05, window_size)
+
+	set_start, set_end : bool
+	idx : int
+	cursor_start := cursor
+
+	for idx in 0..<chars_to_draw {
+		char, has_char          := char_ok(typing.typed[:], idx)
+		target_char, has_target := char_ok(typing.sample.text, idx)
+
+		target_is_newline := target_char == '\n'
+		is_newline        := char == '\n'
+
+		lo, hi         := get_lo_hi(typing.range)
+		is_highlighted := lo <= idx && idx < hi
+		is_wrong := has_char && has_target && target_char != char
+
+		width : f32
+		if target_is_newline || is_newline {
+			width = draw_text(.Measure, {}, tc.font_size, COLOR_FG, "%v", NEWLINE_STR)
+		} else {
+			target_width := draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", target_char)
+			char_width   := !has_char ? target_width : draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", char)
+			width        = math.max(char_width, target_width)
+		}
+
+		if cursor.x + width > window_size.x {
+			// NOTE: Update the other place as well
+			// Wrap the text - the current line has overflowed
+			cursor.x = cursor_start.x
+			cursor.y += tc.row_offset.y
+		}
+
+		{
+			cursor := cursor
+
+			if idx == typing.range.start {
+				result.start_caret_at, set_start = cursor, true
+			}
+			if idx == typing.range.end {
+				result.end_caret_at, set_end = cursor, true
+			}
+
+			if phase == .Draw {
+				typed_char := char
+
+				char := target_char
+				col  := COLOR_TARGET
+				bg_col := Color{}
+				if is_highlighted {
+					col = COLOR_BG
+					char = typed_char
+					bg_col = COLOR_HIGHLIGHT
+				} else if is_wrong {
+					if counter % 30 < 15 {
+						col = COLOR_WRONG
+						char = typed_char
+					} else {
+						col = COLOR_TARGET
+						char = target_char
+					}
+				} else if has_char {
+					col = COLOR_FG
+					char = typed_char
+				} 
+
+				draw_single_character_with_highlight(cursor, char, tc, width, col, bg_col, draw_newline = is_wrong)
+			}
+		}
+
+		cursor.x += width + tc.spacing
+		if target_is_newline {
+			// NOTE: Update the other place as well
+			// Wrap the text - newline
+			cursor.x = cursor_start.x
+			cursor.y += tc.row_offset.y
+			// break;
+		}
+	}
+
+	result.cursor = cursor
+
+	if !set_start { result.start_caret_at = cursor + tc.row_offset }
+	if !set_end   { result.end_caret_at = cursor + tc.row_offset }
+
+	result.cursor = cursor
+
+	return 
 }
 
 
@@ -1344,24 +1378,18 @@ draw_single_character_with_highlight :: proc(
 	char: u8,
 	tc: TextConfig,
 	width: f32,
-	col, hi_col, hi_col_bg: Color,
-	highlighted: bool,
+	col, bg_col: Color,
 	draw_newline: bool,
 ) {
-	text_col := col
-	if highlighted {
-		text_col = hi_col
-	}
-
-	if highlighted {
-		draw_letter_highlight(cursor, width, tc.spacing, tc.vertical_spacing, tc.font_size, hi_col_bg)
+	if bg_col != {} {
+		draw_letter_highlight(cursor, width, tc.spacing, tc.vertical_spacing, tc.font_size, bg_col)
 	}
 
 	if char == '\n' {
 		if draw_newline {
-			draw_text(.Draw, cursor, tc.font_size, text_col, NEWLINE_STR)
+			draw_text(.Draw, cursor, tc.font_size, col, NEWLINE_STR)
 		}
 	} else {
-		draw_text(.Draw, cursor, tc.font_size, text_col, "%c", char)
+		draw_text(.Draw, cursor, tc.font_size, col, "%c", char)
 	}
 }
