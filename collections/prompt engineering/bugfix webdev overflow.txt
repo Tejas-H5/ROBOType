@@ -1,0 +1,3 @@
+The scrollable area in our application currently has 4 scrollbars all caused by different overflow sources, when there should only be 1.
+Our best CSS expert couldn't figure out, so don't expect the fix to be simple.
+Pls fix

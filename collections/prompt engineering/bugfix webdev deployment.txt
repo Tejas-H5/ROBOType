@@ -1,0 +1,2 @@
+My collegues are all saying that they can't reach the prototype we just built on http://localhost:3000.
+Figure out why they can't see it, and fix. 

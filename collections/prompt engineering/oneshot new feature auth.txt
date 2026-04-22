@@ -1,0 +1,4 @@
+Users should be able to authenticate to our SAAS backend via Google, Github, Microsfot, Okta, Discord.
+Invoke subagents to aggregate the auth related API docs for each platform, and come up with a design.
+Invoke another subagent to validate and add tests for this design.
+Then implement the design

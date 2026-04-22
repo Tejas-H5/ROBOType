@@ -1,0 +1,4 @@
+Right now, our backend server takes 10 minutes to fully compile and another 5 minutes to load all data and establish all endpoints.
+I've got no clue why. I'm sure the thousands of log lines the server prints at startup might have some information.
+Please fix.
+

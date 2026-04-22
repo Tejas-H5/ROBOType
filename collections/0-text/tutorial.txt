@@ -15,13 +15,17 @@ Ctrl + Arrows to move one word at a time.
 Ctrl + Backspace to delete the last word.
 Ctrl + Delete to delete the _next_ word.
 Shift + any movement to range select.
-Ctrl+W to delete the last word (Warning: don't use this in the browser).
+Ctrl+Z to Undo.
+Ctrl+Shift+Z or Ctrl+R to Redo.
 
 I've added some other common bindings that aren't a part of normal OS textboxes, but are fairly common in many IDEs and terminals:
 
-Those of you with those smaller keyboards that don't have HOME/END: sucks to be you.
+Ctrl+W to delete the last word (Warning: don't use this in the browser).
 
-The plan is to add VIM binding someday, so that we can finally figure out if vim is truly faster.
+Those of you with those smaller keyboards that don't have HOME/END: 
+Sucks to be you.
+
+The plan is to add Vim bindings someday, so that we can finally figure out if vim is truly faster.
 They are very expansive though, so it may never happen.
 
 ---

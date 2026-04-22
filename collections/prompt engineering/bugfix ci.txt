@@ -1,0 +1,4 @@
+Right now, our CI takes a full day to complete.
+The yaml file is approaching 6000 lines now, and none of us know what the stages do.
+Please simplify and refactor. Update documentation as needed, add tests as needed.
+

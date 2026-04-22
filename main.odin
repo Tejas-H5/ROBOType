@@ -12,10 +12,10 @@ import "core:unicode"
 import "core:c"
 import rl "vendor:raylib"
 
-ANIMATE_SPEED            :: 400
+ANIMATE_SPEED            :: 0.5
 IS_DEBUGGING_COMPLETION  :: false
 IS_DEBUGGING_NEW_RECORD  :: false
-IS_DEBUGGING_UNDO_BUFFER :: true
+IS_DEBUGGING_UNDO_BUFFER :: false
 
 NEWLINE_STR :: "\\n"
 
@@ -81,6 +81,8 @@ TypingState :: struct {
 	undo_idx   : int,
 	range      : SelectionRange,
 	blink_time : f32,
+	mutation_unhandled : bool,
+
 
 	// TODO: clipboard, undo, find out the remaining features.
 	// Not really necessary for a
@@ -115,7 +117,7 @@ SelectionRange :: struct { start, end: int }
 COLOR_BG        :: Color{ 255, 255, 255, 255 }
 COLOR_BG2       :: Color{ 200, 200, 200, 255 }
 COLOR_FG        :: Color{ 0, 0, 0, 255 }
-COLOR_TARGET    :: Color{ 125, 125, 125, 255 }
+COLOR_TARGET    :: Color{ 170, 170, 170, 255 }
 COLOR_HIGHLIGHT :: Color{ 0, 120, 215, 255 }
 COLOR_WRONG     :: Color{ 255, 125, 125, 255 }
 COLOR_RED       :: Color{ 255, 0, 0, 255 }
@@ -123,6 +125,12 @@ COLOR_RED       :: Color{ 255, 0, 0, 255 }
 last_monitor : c.int
 
 main :: proc() {
+  // const int WINWIDTH  = 800;                   // win size
+  // const int WINHEIGHT = 450;                   // win size
+  // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI); // hi-res
+  // InitWindow ( WINWIDTH, WINHEIGHT, "RayLib Example" );
+
+	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_HIGHDPI})
 	rl.InitWindow(0, 0, "RoboType")
 	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
 	rl.SetExitKey(.KEY_NULL)
@@ -178,7 +186,7 @@ load_game_state :: proc() -> ^State {
 	// The truetype font as loaded by RayLib looks like ass for some reason. 
 	// Manually converting it to a bitmap font does not help.
 	// Not solved yet. 
-	font = rl.LoadFontEx("./font/IBMPlexMono-Regular.ttf", 64, nil, 250)
+	font = rl.LoadFontEx("./font/IBMPlexMono-Regular.ttf", 128, nil, 250)
 	// rl.SetTextureFilter(font.texture, .POINT)
 
 	load_available_collections(state)
@@ -187,7 +195,7 @@ load_game_state :: proc() -> ^State {
 		// Airdrop ourselves right to the end
 		idx : int = -1
 		for collection, i in state.available_collections {
-			if collection.name == "puzzles" {
+			if collection.name == "0-text" {
 				idx = i
 			}
 		}
@@ -198,7 +206,7 @@ load_game_state :: proc() -> ^State {
 		n := len(state.typing.sample.text)
 		for char, idx in state.typing.sample.text {
 			if idx == n -1 {break}
-			append(&state.typing.typed, char)
+			insert_text(&state.typing, len(state.typing.typed), []byte{ char })
 		}
 		set_cursor_pos(&state.typing, n, false)
 	}
@@ -318,6 +326,8 @@ delete_text :: proc(typing: ^TypingState, range: SelectionRange, is_undo := fals
 	remove_range(&typing.typed, lo, hi)
 	set_cursor_pos(typing, lo, false)
 
+	typing.mutation_unhandled = true
+
 	return true
 }
 
@@ -331,6 +341,7 @@ insert_text :: proc(typing: ^TypingState, idx: int,  val: []byte, is_undo := fal
 	}
 	inject_at_elems(&typing.typed, idx, ..val)
 	set_cursor_pos(typing, idx + len(val), false)
+	typing.mutation_unhandled = true
 }
 
 get_lo_hi :: proc(range: SelectionRange) -> (int, int) {
@@ -547,10 +558,11 @@ run_typing :: proc(state: ^State) {
 		}
 
 		curr_len := len(typing.typed)
-		mutated  := prev_len != curr_len
 		selection_changed := typing.range.end != prev_end
 
-		if mutated || selection_changed {
+		defer typing.mutation_unhandled = false
+
+		if typing.mutation_unhandled || selection_changed {
 			// NOTE: this only applies to horizontal movement 
 			// I've recently decided to not have horizontal movement, but yet to fully commit. I'll remove this later
 			// state.is_animated = !mutated
@@ -558,7 +570,7 @@ run_typing :: proc(state: ^State) {
 			typing.blink_time  = 0
 		}
 
-		if mutated {
+		if typing.mutation_unhandled {
 			if curr_len == 0 {
 				// Prevent typing everything but the final letter, then clearing all, resetting the timer, then pasting getting a sub-1 second time.
 				clear(&typing.copied)
@@ -614,22 +626,20 @@ run_typing :: proc(state: ^State) {
 	window_size := state.size
 	dt          := state.dt
 
+	tc := create_text_config(0.06, window_size)
+
 	center       := window_size / 2
-	font_size    := window_size.y * 0.05
-	spacing      := f32(0) // font_size / 10
-	vertical_spacing := font_size / 5
-	row_offset   := Vec2{0, font_size + spacing}
-	cursor_start := Vec2{ spacing, spacing }
-	character_width := f32(rl.MeasureTextEx(font, "w", font_size, 0).x)
+	cursor_start := Vec2{ tc.spacing, tc.spacing }
+	character_width := f32(rl.MeasureTextEx(font, "w", tc.font_size, 0).x)
 
 	typing.blink_time += dt
 
 
 	start_caret_at, end_caret_at : Vec2
 	cursor := cursor_start
-	document_height : f32
 
 	counter += 1
+
 
 	for phase in UI_PHASES { 
 		cursor = cursor_start
@@ -641,9 +651,9 @@ run_typing :: proc(state: ^State) {
 		result: DrawTextResult
 		switch DRAW_MODE {
 		case .Overlayed:
-			result = draw_text_overlayed(phase, typing, cursor, window_size)
+			result = draw_text_overlayed(tc, phase, typing, cursor, window_size)
 		case .Rows:
-			result = draw_text_rows(phase, typing, cursor, window_size)
+			result = draw_text_rows(tc, phase, typing, cursor, window_size)
 		}
 
 		start_caret_at = result.start_caret_at
@@ -653,12 +663,10 @@ run_typing :: proc(state: ^State) {
 		cursor = result.cursor
 
 		if phase == .Measure {
-			document_height = cursor.y
-
 			if !typing.completed {
 				// Make sure that the 'camera' starts at this character.
-				start := -start_caret_at + 6 * (character_width + spacing)
-				end   := -end_caret_at   + 6 * (character_width + spacing)
+				start := -start_caret_at + 6 * (character_width + tc.spacing)
+				end   := -end_caret_at   + 6 * (character_width + tc.spacing)
 
 				offset : Vec2
 				point_where_we_should_start_scrolling := center.y
@@ -682,17 +690,20 @@ run_typing :: proc(state: ^State) {
 	if typing.completed {
 		// Admire the view
 
+		// Only true when the typing has completed btw
+		document_height := cursor.y
+
 		target_a := -window_size.y * 0.1
 		target_b := math.max(0, document_height - window_size.y + window_size.y * 0.1)
 
 		if typing.animation_zig {
-			typing.animation_t += dt * ANIMATE_SPEED
+			typing.animation_t += dt * window_size.y * ANIMATE_SPEED
 			if typing.animation_t > target_b {
 				typing.animation_t = target_b
 				typing.animation_zig = !typing.animation_zig
 			}
 		} else {
-			typing.animation_t -= dt * ANIMATE_SPEED
+			typing.animation_t -= dt * window_size.y * ANIMATE_SPEED
 			if typing.animation_t < target_a {
 				typing.animation_t = target_a
 				typing.animation_zig = !typing.animation_zig
@@ -708,14 +719,14 @@ run_typing :: proc(state: ^State) {
 	if typing.blink_time < BLINK_TIME / 2 {
 		// This is the size we need for the cursor to mathematically fit between the letters without
 		// touching the letters and also distribute the spacing nicely
-		cursor_width   := font_size / 10
+		cursor_width   := tc.font_size / 10
 
-		rl.DrawRectangleV({ end_caret_at.x, end_caret_at.y }, { cursor_width, font_size }, COLOR_FG)
+		rl.DrawRectangleV({ end_caret_at.x, end_caret_at.y }, { cursor_width, tc.font_size }, COLOR_FG)
 	}
 
 	// Status line
 	{
-		font_size         := font_size / 1.5
+		font_size         := tc.font_size / 1.5
 		vertical_spacing  := font_size / 5
 		spacing           := font_size / 10
 		statusline_height := font_size + vertical_spacing
@@ -734,6 +745,11 @@ run_typing :: proc(state: ^State) {
 		}
 
 		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | time: %.3f", duration)
+		if typing.sample.personal_best != 0 {
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | personal best: %.3f", typing.sample.personal_best)
+		} else {
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | no record set")
+		}
 	}
 
 	if typing.completed {
@@ -749,7 +765,7 @@ run_typing :: proc(state: ^State) {
 
 		if typing.duration < typing.prev_duration {
 			col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
-			typing.animation_new_record += dt * 1000
+			typing.animation_new_record += dt * 0.5 * window_size.y
 			cursor.x += draw_text(.Draw, cursor, font_size, col, "New record!!!")
 		}
 
@@ -1084,7 +1100,7 @@ draw_text_row :: proc(
 
 		width : f32
 		if target_is_newline || is_newline {
-			width = draw_text(.Measure, {}, tc.font_size, COLOR_FG, "%v", NEWLINE_STR)
+			width = draw_text(.Measure, {}, tc.font_size / 2, COLOR_FG, "%v", NEWLINE_STR)
 		} else {
 			target_width := draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", target_char)
 			char_width   := !has_char ? target_width : draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", char)
@@ -1219,18 +1235,16 @@ TextConfig :: struct {
 }
 
 create_text_config :: proc(font_size_wh: f32, window_size: Vec2) -> (result: TextConfig) {
-	result.font_size          = window_size.y * font_size_wh
+	result.font_size          = math.round(window_size.y * font_size_wh)
 	result.spacing            = f32(0) // font_size / 10
 	result.vertical_spacing   = result.font_size / 5
 	result.row_offset         = Vec2{0, result.font_size + result.vertical_spacing}
 	return
 }
 
-draw_text_rows :: proc(phase: UiPhase, typing: ^TypingState, cursor_start: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
+draw_text_rows :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState, cursor_start: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
 	cursor: Vec2
 	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
-
-	tc := create_text_config(0.05, window_size)
 
 	set_start, set_end : bool
 	idx : int
@@ -1278,36 +1292,69 @@ draw_text_rows :: proc(phase: UiPhase, typing: ^TypingState, cursor_start: Vec2,
 
 counter := 0
 
-draw_text_overlayed :: proc(phase: UiPhase, typing: ^TypingState, cursor: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
+draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState, cursor: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
 	cursor := cursor
-	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
 
-	tc := create_text_config(0.05, window_size)
+	final_typed_cursor : Vec2
+	final_typed_cursor_idx := -1
 
-	set_start, set_end : bool
-	idx : int
+	n_typed  := len(typing.typed)
+	n_target := len(typing.sample.text)
+
+	// the same indices can be seen multiple times.
+	// we want to keep the earliest set
+	set_start, set_end := false, false
 	cursor_start := cursor
 
-	for idx in 0..<chars_to_draw {
-		char, has_char          := char_ok(typing.typed[:], idx)
-		target_char, has_target := char_ok(typing.sample.text, idx)
+	typed_idx, target_idx := 0, 0
+	block_typed, block_target := false, false
 
-		target_is_newline := target_char == '\n'
-		is_newline        := char == '\n'
+	had_typed := false
+	for typed_idx <= n_typed || target_idx <= n_target {
+		typed_char, has_typed   := char_ok(typing.typed[:],    typed_idx)
+		target_char, has_target := char_ok(typing.sample.text, target_idx)
+		defer had_typed = has_typed
+
+		target_is_newline_or_end := target_char == '\n' || !has_target
+		typed_is_newline_or_end  := typed_char == '\n' || !has_typed
 
 		lo, hi         := get_lo_hi(typing.range)
-		is_highlighted := lo <= idx && idx < hi
-		is_wrong := has_char && has_target && target_char != char
+		is_highlighted := lo <= typed_idx && typed_idx < hi
 
-		width : f32
-		if target_is_newline || is_newline {
-			width = draw_text(.Measure, {}, tc.font_size, COLOR_FG, "%v", NEWLINE_STR)
-		} else {
-			target_width := draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", target_char)
-			char_width   := !has_char ? target_width : draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", char)
-			width        = math.max(char_width, target_width)
+		finished_drawing_line := false
+		if target_is_newline_or_end && typed_is_newline_or_end {
+			if !block_target && !block_typed {
+				finished_drawing_line = true
+			} else if block_target || block_typed {
+				finished_drawing_line = true
+				block_target = false
+				block_typed = false
+			}
+		} else if target_is_newline_or_end {
+			block_target = true
+		} else if typed_is_newline_or_end {
+			block_typed = true
 		}
 
+		defer if !block_typed  { typed_idx  += 1 }
+		defer if !block_target { target_idx += 1 }
+
+		measure_letter :: proc(char: byte, tc: TextConfig, has: bool) -> f32 {
+			if !has {return 0}
+
+			width : f32
+			if char == '\n' {
+				width = draw_text(.Measure, {}, tc.font_size / 2, {}, "%v", {})
+			} else {
+				width = draw_text(.Measure, {}, tc.font_size, {}, "%c", char)
+			}
+			return width
+		}
+
+		width := math.max(
+			measure_letter(typed_char, tc, has_typed && !block_typed),
+			measure_letter(target_char, tc, has_target && !block_target)
+		)
 		if cursor.x + width > window_size.x {
 			// NOTE: Update the other place as well
 			// Wrap the text - the current line has overflowed
@@ -1315,57 +1362,57 @@ draw_text_overlayed :: proc(phase: UiPhase, typing: ^TypingState, cursor: Vec2, 
 			cursor.y += tc.row_offset.y
 		}
 
-		{
-			cursor := cursor
-
-			if idx == typing.range.start {
+		if has_typed || had_typed {
+			if typed_idx == typing.range.start && !set_start {
 				result.start_caret_at, set_start = cursor, true
 			}
-			if idx == typing.range.end {
+			if typed_idx == typing.range.end && !set_end {
 				result.end_caret_at, set_end = cursor, true
 			}
 
-			if phase == .Draw {
-				typed_char := char
-
-				char := target_char
-				col  := COLOR_TARGET
-				bg_col := Color{}
-				if is_highlighted {
-					col = COLOR_BG
-					char = typed_char
-					bg_col = COLOR_HIGHLIGHT
-				} else if is_wrong {
-					if counter % 30 < 15 {
-						col = COLOR_WRONG
-						char = typed_char
-					} else {
-						col = COLOR_TARGET
-						char = target_char
-					}
-				} else if has_char {
-					col = COLOR_FG
-					char = typed_char
-				} 
-
-				draw_single_character_with_highlight(cursor, char, tc, width, col, bg_col, draw_newline = is_wrong)
+			if final_typed_cursor_idx < typed_idx {
+				final_typed_cursor, final_typed_cursor_idx = cursor, typed_idx
 			}
 		}
 
+		if block_typed  {has_typed  = false}
+		if block_target {has_target = false}
+
+		is_wrong := has_typed && (target_char != typed_char || !has_target)
+
+		if phase == .Draw {
+			char := target_char
+			col  := COLOR_TARGET
+			bg_col := Color{}
+
+			if is_highlighted && (has_typed || had_typed) {
+				col = COLOR_BG
+				char = typed_char
+				bg_col = COLOR_HIGHLIGHT
+			} else if is_wrong {
+				if counter % 30 < 15 {
+					col = COLOR_WRONG
+					char = typed_char
+				} else {
+					col = COLOR_TARGET
+					char = target_char
+				}
+			} else if has_typed {
+				col = COLOR_FG
+				char = typed_char
+			} 
+
+			draw_single_character_with_highlight(cursor, char, tc, width, col, bg_col, draw_newline = is_wrong)
+		}
+
 		cursor.x += width + tc.spacing
-		if target_is_newline {
+		if finished_drawing_line  {
 			// NOTE: Update the other place as well
 			// Wrap the text - newline
 			cursor.x = cursor_start.x
 			cursor.y += tc.row_offset.y
-			// break;
 		}
 	}
-
-	result.cursor = cursor
-
-	if !set_start { result.start_caret_at = cursor + tc.row_offset }
-	if !set_end   { result.end_caret_at = cursor + tc.row_offset }
 
 	result.cursor = cursor
 
@@ -1387,7 +1434,7 @@ draw_single_character_with_highlight :: proc(
 
 	if char == '\n' {
 		if draw_newline {
-			draw_text(.Draw, cursor, tc.font_size, col, NEWLINE_STR)
+			draw_text(.Draw, cursor + {0, tc.font_size / 4}, tc.font_size / 2, col, NEWLINE_STR)
 		}
 	} else {
 		draw_text(.Draw, cursor, tc.font_size, col, "%c", char)

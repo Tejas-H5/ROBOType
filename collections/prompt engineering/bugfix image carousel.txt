@@ -1,0 +1,4 @@
+Right now, when we navigate to the image gallery, we can only display 6 images.
+We need to display more than 6 images somehow.
+Figure out what needs to be done, then fix.
+Update tests and documentation as needed.

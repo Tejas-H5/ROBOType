@@ -1,0 +1,5 @@
+For the "Ticket" feature in our issue tracker, we have a corresponding "Comments" feature.
+Users can reply under these comments to create a corresponding "Thread" under this comment.
+We currently expose the ability to reply internally via our GraphQL resolvers.
+It's about time that we exposed this functionality via the public REST API. 
+Make no mistakes, add tests, update documentation as needed.

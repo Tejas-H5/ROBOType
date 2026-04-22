@@ -1,0 +1,6 @@
+Right now, our Odin+Raylib typing game only supports ASCII.
+It is currently very jagged, and doesn't support emojis or unicode. 
+My keyboard can't type those anyway, and the code that loads these samples actively strips those symbols out, but that's not the point.
+We need to update the text rendering to be more like Chrome's.
+Try to do this in no more than 500 lines of additional Odin code, and don't include dependencies.
+Don't cheat by having very long lines, or obfuscating and extracting binaries in the sourcecode.

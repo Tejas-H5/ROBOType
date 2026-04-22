@@ -1,0 +1,5 @@
+I need you to fix our backdoor bugfix prompt. 
+Right now, it tells the agent to buy more credits when it hits API limits.
+However, by the time it's hit API limits, it won't be able to buy more credits.
+We (by we I mean you) need to fix the logic in the prompt somehow.
+Pls get it working
