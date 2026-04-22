@@ -22,7 +22,6 @@ NEWLINE_STR :: "\\n"
 DRAW_MODE :: TextDrawMode.Overlayed
 
 TextDrawMode :: enum {
-	Rows,
 	Overlayed,
 }
 
@@ -652,8 +651,6 @@ run_typing :: proc(state: ^State) {
 		switch DRAW_MODE {
 		case .Overlayed:
 			result = draw_text_overlayed(tc, phase, typing, cursor, window_size)
-		case .Rows:
-			result = draw_text_rows(tc, phase, typing, cursor, window_size)
 		}
 
 		start_caret_at = result.start_caret_at
@@ -1068,113 +1065,6 @@ DrawLineResult :: struct {
 	all_right  : bool,
 }
 
-draw_text_row :: proc(
-	phase: UiPhase,
-	typing: ^TypingState,
-	start,
-	to_draw: int,
-	cursor: Vec2,
-	tc: TextConfig,
-	window_size: Vec2,
-	draw_target_row: bool,
-) -> (result: DrawLineResult) {
-	cursor_start := cursor
-
-	cursor := cursor
-
-	result.all_right = true
-
-	for idx in start..<to_draw {
-		result.idx = idx + 1
-
-		char, has_char          := char_ok(typing.typed[:], idx)
-		target_char, has_target := char_ok(typing.sample.text, idx)
-
-		target_is_newline := target_char == '\n'
-		is_newline        := char == '\n'
-
-		is_wrong := has_char && has_target && target_char != char
-		if is_wrong || !has_char {
-			result.all_right = false
-		}
-
-		width : f32
-		if target_is_newline || is_newline {
-			width = draw_text(.Measure, {}, tc.font_size / 2, COLOR_FG, "%v", NEWLINE_STR)
-		} else {
-			target_width := draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", target_char)
-			char_width   := !has_char ? target_width : draw_text(.Measure, cursor, tc.font_size, COLOR_BG, "%c", char)
-			width        = math.max(char_width, target_width)
-		}
-
-		if cursor.x + width > window_size.x {
-			// NOTE: Update the other place as well
-			// Wrap the text - the current line has overflowed
-			cursor.x = cursor_start.x
-			cursor.y += tc.row_offset.y
-			if draw_target_row {
-				cursor.y += tc.row_offset.y
-			}
-		}
-
-		{
-			cursor := cursor
-
-			// Target text
-			if draw_target_row {
-				if phase == .Draw {
-					draw_single_character_with_highlight(
-						cursor, target_char, tc, width, 
-						col         = is_wrong ? COLOR_BG : COLOR_TARGET,
-						bg_col      = is_wrong ? COLOR_WRONG : {},
-						draw_newline = is_wrong,
-					)
-				}
-
-				cursor += tc.row_offset
-			}
-
-			if idx == typing.range.start {
-				result.start_caret_at, result.set_start = cursor, true
-			}
-			if idx == typing.range.end {
-				result.end_caret_at, result.set_end = cursor, true
-			}
-
-			// Typed text
-			{
-				if phase == .Draw {
-					lo, hi         := get_lo_hi(typing.range)
-					is_highlighted := lo <= idx && idx < hi
-
-					draw_single_character_with_highlight(
-						cursor, char, tc, width, 
-						col         = is_highlighted ? COLOR_BG : COLOR_FG,
-						bg_col      = is_highlighted ? COLOR_HIGHLIGHT : {},
-						draw_newline = is_wrong,
-					)
-				}
-			}
-		}
-
-		cursor.x += width + tc.spacing
-		if target_is_newline {
-			// NOTE: Update the other place as well
-			// Wrap the text - newline
-			cursor.x = cursor_start.x
-			cursor.y += tc.row_offset.y
-			if draw_target_row {
-				cursor.y += tc.row_offset.y
-			}
-			break;
-		}
-	}
-
-	result.cursor = cursor
-
-	return
-}
-
 pull_float :: proc(str: ^string) -> (val: f32, ok: bool) {
 	val_str := strings.split_iterator(str, ",") or_return
 
@@ -1240,54 +1130,6 @@ create_text_config :: proc(font_size_wh: f32, window_size: Vec2) -> (result: Tex
 	result.vertical_spacing   = result.font_size / 5
 	result.row_offset         = Vec2{0, result.font_size + result.vertical_spacing}
 	return
-}
-
-draw_text_rows :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState, cursor_start: Vec2, window_size: Vec2) -> (result: DrawTextResult) {
-	cursor: Vec2
-	chars_to_draw := math.max(len(typing.typed), len(typing.sample.text))
-
-	set_start, set_end : bool
-	idx : int
-	for idx < chars_to_draw {
-		cursor_start := cursor
-		row_result := draw_text_row(
-			.Measure,
-			typing, 
-			idx, chars_to_draw,
-			cursor_start,
-			tc,
-			window_size,
-			draw_target_row = true
-		)
-		row_result = draw_text_row(
-			phase,
-			typing, 
-			idx, chars_to_draw,
-			cursor_start,
-			tc,
-			window_size,
-			draw_target_row = !row_result.all_right
-		)
-
-		idx    = row_result.idx
-		cursor = row_result.cursor
-
-		if row_result.set_start {
-			set_start = row_result.set_start
-			result.start_caret_at = row_result.start_caret_at
-		}
-		if row_result.set_end {
-			set_end = row_result.set_end
-			result.end_caret_at = row_result.end_caret_at
-		}
-	}
-
-	if !set_start { result.start_caret_at = cursor + tc.row_offset }
-	if !set_end   { result.end_caret_at = cursor + tc.row_offset }
-
-	result.cursor = cursor
-
-	return 
 }
 
 counter := 0
