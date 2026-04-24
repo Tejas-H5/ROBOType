@@ -1,6 +1,7 @@
 package main
 
-import "core:path/slashpath"
+import "core:mem"
+import "core:path/filepath"
 import "core:fmt"
 import "core:strconv"
 import "core:slice"
@@ -16,6 +17,9 @@ ANIMATE_SPEED            :: 0.5
 IS_DEBUGGING_COMPLETION  :: false
 IS_DEBUGGING_NEW_RECORD  :: false
 IS_DEBUGGING_UNDO_BUFFER :: false
+IS_DEBUGGING_ALLOCATIONS :: false
+
+COLLECTIONS_PATH :: "collections"
 
 NEWLINE_STR :: "\\n"
 
@@ -29,12 +33,27 @@ TextDrawMode :: enum {
 // TODO: remove asserts from the main path
 
 View :: enum {
-	Collections,
 	Samples,
 	Typing,
 }
 
 font: Font
+
+LoadableItemType :: enum {
+	Collection,
+	Sample,
+}
+
+LoadableItem :: struct {
+	name: string,
+	type: LoadableItemType,
+	sample: ^Sample,
+}
+
+CurrentPath :: struct {
+	parent : ^CurrentPath,
+	path: string,
+}
 
 State :: struct {
 	requested_quit : bool,
@@ -43,19 +62,17 @@ State :: struct {
 
 	view: View,
 
-	available_collections : [dynamic]Collection,
-	collection_idx        : int,
+	// NOTE: all this stuff needs a total rework.
+	current_path : ^CurrentPath,
+	load_sample  : ^Sample,
 
-	loaded_collection : ^Collection,
-	available_samples : [dynamic]Sample,
-	sample_idx : int,
+	available_items : [dynamic]LoadableItem,
+	item_idx        : int,
+
+	available_samples_arena     : mem.Dynamic_Arena,
+	available_samples_allocator : mem.Allocator,
 
 	typing: TypingState,
-}
-
-Collection :: struct {
-	name     : string,
-	fullpath : string,
 }
 
 CollectionProgressEntry :: struct {
@@ -97,6 +114,7 @@ TypingState :: struct {
 	// This is especially the case in the puzzle levels, that will rely heavily on moving the
 	// cursor around and copy-pasting stuff. 
 	started_time  : f64,
+	perfect : bool,
 	duration : f32,
 	prev_duration : f32,
 	completed : bool,
@@ -107,8 +125,10 @@ TypingState :: struct {
 
 Sample :: struct {
 	name: string,
+	relative_path: string,
 	text: []byte,
 	personal_best: f32,
+	perfect: bool,
 }
 
 SelectionRange :: struct { start, end: int }
@@ -118,69 +138,17 @@ COLOR_BG2       :: Color{ 200, 200, 200, 255 }
 COLOR_FG        :: Color{ 0, 0, 0, 255 }
 COLOR_TARGET    :: Color{ 170, 170, 170, 255 }
 COLOR_HIGHLIGHT :: Color{ 0, 120, 215, 255 }
-COLOR_WRONG     :: Color{ 255, 125, 125, 255 }
+COLOR_WRONG     :: Color{ 255, 0, 0, 255 }
 COLOR_RED       :: Color{ 255, 0, 0, 255 }
 
 last_monitor : c.int
 
-main :: proc() {
-  // const int WINWIDTH  = 800;                   // win size
-  // const int WINHEIGHT = 450;                   // win size
-  // SetConfigFlags(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI); // hi-res
-  // InitWindow ( WINWIDTH, WINHEIGHT, "RayLib Example" );
-
-	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_HIGHDPI})
-	rl.InitWindow(0, 0, "RoboType")
-	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
-	rl.SetExitKey(.KEY_NULL)
-
-	last_monitor = -1
-
-	set_logging_type(.Fmt)
-
-	defer rl.CloseWindow()
-
-	state := load_game_state()
-
-	for !rl.WindowShouldClose() && !state.requested_quit {
-		monitor := rl.GetCurrentMonitor()
-		if last_monitor != monitor {
-			last_monitor = monitor
-			rl.SetTargetFPS(rl.GetMonitorRefreshRate(monitor))
-		}
-
-		state.size.x = f32(rl.GetScreenWidth())
-		state.size.y = f32(rl.GetScreenHeight())
-		state.dt     = rl.GetFrameTime();
-
-		rl.BeginDrawing(); {
-			run_game(state)
-		} rl.EndDrawing();
-	}
-}
-
-load_available_collections :: proc(state: ^State) {
-	files, err := os.read_all_directory_by_path("./collections", context.temp_allocator)
-	assert(err == nil)
-	defer free_all(context.temp_allocator)
-
-	clear(&state.available_collections)
-	for file in files {
-		if file.type == .Directory {
-			collection := Collection{
-				name = strings.clone(file.name),
-				fullpath = strings.clone(file.fullpath),
-			}
-			append(&state.available_collections, collection)
-		}
-	}
-	state.collection_idx = math.clamp(state.collection_idx, 0, len(state.available_collections) - 1)
-}
 
 load_game_state :: proc() -> ^State {
 	state := new(State)
-
-	state.view = .Collections
+	mem.dynamic_arena_init(&state.available_samples_arena)
+	state.available_samples_allocator = mem.dynamic_arena_allocator(&state.available_samples_arena)
+	state.current_path = new_clone(CurrentPath{path = COLLECTIONS_PATH})
 
 	// The truetype font as loaded by RayLib looks like ass for some reason. 
 	// Manually converting it to a bitmap font does not help.
@@ -188,20 +156,12 @@ load_game_state :: proc() -> ^State {
 	font = rl.LoadFontEx("./font/IBMPlexMono-Regular.ttf", 128, nil, 250)
 	// rl.SetTextureFilter(font.texture, .POINT)
 
-	load_available_collections(state)
+	state.view = .Samples
+	load_directory_or_file(state, COLLECTIONS_PATH)
 
 	if IS_DEBUGGING_COMPLETION {
 		// Airdrop ourselves right to the end
-		idx : int = -1
-		for collection, i in state.available_collections {
-			if collection.name == "0-text" {
-				idx = i
-			}
-		}
-		assert(idx != -1)
-
-		load_collection(state, &state.available_collections[idx])
-		start_typing(state)
+		load_directory_or_file(state, "collections/programming/odin/hellope.odin")
 		n := len(state.typing.sample.text)
 		for char, idx in state.typing.sample.text {
 			if idx == n -1 {break}
@@ -210,63 +170,131 @@ load_game_state :: proc() -> ^State {
 		set_cursor_pos(&state.typing, n, false)
 	}
 
+
 	return state
 }
 
-load_collection :: proc(state: ^State, collection: ^Collection) {
-	files, err := os.read_all_directory_by_path(collection.fullpath, context.allocator)
-	assert(err == nil)
-	defer delete(files)
+load_directory_or_file :: proc(state: ^State, relative_path: string) {
+	stat, star_err := os.stat(relative_path, context.allocator)
+	defer os.file_info_delete(stat, context.allocator)
+	if star_err != nil {
+		// TODO: Handle error
+		assert(false)
+	}
+
+	// TODO: validate
+	arena := state.available_samples_allocator
+	free_all(arena)
+	clear(&state.available_items)
+	debug_log("cleared the arena")
+
+	#partial switch stat.type {
+	case .Regular:
+		debug_log("loading sample %v ...", stat.name)
+
+		sample := load_sample(state, relative_path, arena)
+		item   := LoadableItem{name=strings.clone(stat.name, arena), type=.Sample, sample=sample}
+		append(&state.available_items, item)
+
+		state.item_idx = 1
+		start_typing(state, sample)
+	case .Directory:
+		state.view = .Samples
+		state.typing.sample = nil
+
+		files, err := os.read_all_directory_by_path(relative_path, context.allocator)
+		assert(err == nil)
+		defer {
+			for fi in files {
+				os.file_info_delete(fi, context.allocator)
+			}
+			delete(files)
+		}
+
+		for fi in files {
+			relative_path, err := filepath.join([]string{relative_path, fi.name}, context.allocator)
+			assert(err == nil)
+			defer delete(relative_path)
+
+			file, file_err := os.open(fi.fullpath)
+			defer os.close(file)
+			if file_err != nil {continue}
+
+			#partial switch fi.type {
+			case .Regular:
+				sample := load_sample(state, relative_path, arena)
+				item   := LoadableItem{name=strings.clone(fi.name, arena), type=.Sample, sample=sample}
+				append(&state.available_items, item)
+			case .Directory:
+				// Only include the directory as a collection if it's got at least 1 item
+				dirs, err := os.read_directory(file, 1, context.allocator)
+				defer delete(dirs)
+
+				if err != nil || len(dirs) == 0 {
+					continue
+				}
+
+				str, err22 := strings.clone(fi.name, allocator=arena)
+				item := LoadableItem{name=str, type=.Collection}
+				append(&state.available_items, item)
+			}
+		}
+
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items))
+	}
+
+	if len(state.available_items) > 0 {
+		slice.sort_by(state.available_items[:], proc(a, b: LoadableItem) -> bool {
+			if a.type != b.type {
+				return int(a.type) < int(b.type);
+			}
+
+			return strings.compare(a.name, b.name) < 0
+		})
+	}
+
+	return
+}
+
+
+load_sample :: proc(state: ^State, relative_path: string, allocator : mem.Allocator) -> ^Sample {
+	text, err := os.read_entire_file_from_path(relative_path, context.allocator)
+	defer delete(text)
+	fmt.assertf(err == nil, "err wasnt nil: %v", err)
 
 	sb := make([dynamic]byte)
 	defer delete(sb)
 
-	state.loaded_collection = collection
+	text_str := string(text)
+	for line in strings.split_lines_iterator(&text_str) {
+		line_trimmed := transmute([]byte)strings.trim_right_space(line)
+		if len(line_trimmed) == 0 {continue}
 
-	clear(&state.available_samples)
-	for file in files {
-		if file.type != .Regular {continue}
+		for b in line_trimmed {
+			type := get_letter_type(b)
+			if type == .Other {continue}
 
-		defer free_all(context.temp_allocator)
-		text, err := os.read_entire_file_from_path(file.fullpath, context.temp_allocator)
-		assert(err == nil)
-
-		clear(&sb)
-
-		text_str := string(text)
-		for line in strings.split_lines_iterator(&text_str) {
-			line_trimmed := transmute([]byte)strings.trim_right_space(line)
-			if len(line_trimmed) == 0 {continue}
-
-			for b in line_trimmed {
-				type := get_letter_type(b)
-				if type == .Other {continue}
-
-				append(&sb, b)
-			}
-
-			remaining_trimmed := strings.trim_right_space(text_str)
-			if remaining_trimmed != "" {
-				append(&sb, '\n')
-			}
+			append(&sb, b)
 		}
 
-		sample := Sample {
-			name = strings.clone(file.name),
-			text = slice.clone(sb[:]),
+		remaining_trimmed := strings.trim_right_space(text_str)
+		if remaining_trimmed != "" {
+			append(&sb, '\n')
 		}
-
-		// Also check for a progress file, and load whatever we put in that
-		load_progress(collection, &sample)
-
-		append(&state.available_samples, sample)
 	}
 
-	if len(state.available_samples) > 0 {
-		state.sample_idx = 0
-	}
+	sample := new_clone(Sample {
+		relative_path = strings.clone(relative_path, allocator),
+		name = strings.clone(filepath.base(relative_path), allocator),
+		text = slice.clone(sb[:], allocator),
+	}, allocator)
 
-	return
+	// Also check for a progress file, and load whatever we put in that
+	load_progress(sample)
+
+	debug_log("loaded %v", relative_path)
+
+	return sample
 }
 
 // truncates the undo buffer, and appends a new entry
@@ -353,7 +381,6 @@ run_game :: proc(state: ^State) {
 	if state.requested_quit {return;}
 
 	switch state.view {
-	case .Collections: run_collection_selector(state)
 	case .Samples:     run_sample_selector(state)
 	case .Typing:      run_typing(state)
 	}
@@ -362,8 +389,17 @@ run_game :: proc(state: ^State) {
 run_typing :: proc(state: ^State) {
 	typing := &state.typing
 
-	if typing.sample == nil           {return}
-	if state.loaded_collection == nil {return}
+	window_size := state.size
+	center       := window_size / 2
+	dt          := state.dt
+	tc := create_text_config(0.06, window_size)
+
+	rl.ClearBackground(COLOR_BG)
+
+	if typing.sample == nil {
+		draw_text(.Draw, center, tc.font_size, COLOR_FG, "Sample was not set!")
+		return
+	}
 
 	// Input
 	if !typing.completed {
@@ -598,8 +634,9 @@ run_typing :: proc(state: ^State) {
 					typing.duration      = f32(rl.GetTime() - typing.started_time)
 					if typing.prev_duration == 0 || typing.duration < typing.prev_duration {
 						typing.sample.personal_best = typing.duration
+						typing.sample.perfect       = typing.perfect
 						// save progress
-						save_progress(state.loaded_collection, typing.sample)
+						save_progress(state, typing.sample)
 						free_all(context.temp_allocator)
 					}
 				}
@@ -607,27 +644,23 @@ run_typing :: proc(state: ^State) {
 		}
 	} else if typing.completed {
 		if rlIsKeyPressedOrRepeated(.ENTER) {
-			n := len(state.available_samples)
-			if state.sample_idx < n - 1 {
-				state.sample_idx += 1
-				start_typing(state)
+			// NOTE: only works because of how we sort samples to the bottom of the items list.
+			// TODO: more nicer to compute this item once we transition to a particular itm
+			n := len(state.available_items)
+			if state.item_idx < n - 1 {
+				state.item_idx += 1
+				start_typing(state, typing.sample)
 			} else {
-				state.view = .Collections
+				state.view = .Samples
 			}
 		}
 		if rlIsKeyPressedOrRepeated(.R) {
-			start_typing(state)
+			start_typing(state, typing.sample)
 		}
 	}
 
-	rl.ClearBackground(COLOR_BG)
 
-	window_size := state.size
-	dt          := state.dt
 
-	tc := create_text_config(0.06, window_size)
-
-	center       := window_size / 2
 	cursor_start := Vec2{ tc.spacing, tc.spacing }
 	character_width := f32(rl.MeasureTextEx(font, "w", tc.font_size, 0).x)
 
@@ -747,6 +780,9 @@ run_typing :: proc(state: ^State) {
 		} else {
 			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | no record set")
 		}
+		if typing.perfect {
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | [perfect]")
+		}
 	}
 
 	if typing.completed {
@@ -759,6 +795,9 @@ run_typing :: proc(state: ^State) {
 		}
 		rl.DrawRectangleV(cursor, {window_size.x, height}, COLOR_BG)
 		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, typing.duration)
+		if typing.perfect {
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " You made no mistakes. ", typing.sample.name, typing.duration)
+		}
 
 		if typing.duration < typing.prev_duration {
 			col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
@@ -778,9 +817,9 @@ run_typing :: proc(state: ^State) {
 			cursor.y += font_size
 		}
 
-		n := len(state.available_samples)
-		if state.sample_idx < n - 1 {
-			next_sample := state.available_samples[state.sample_idx + 1]
+		n := len(state.available_items)
+		if state.item_idx < n - 1 {
+			next_sample := state.available_items[state.item_idx + 1]
 			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> next sample - %v, [R] -> Restart", next_sample.name)
 		} else {
 			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> collections, [R] -> Restart")
@@ -812,7 +851,7 @@ get_letter_type :: proc(b: byte) -> LetterType {
 	if r == ' '  {return .Whitespace }
 
 	if unicode.is_letter(r) {return .Letter}
-	if unicode.is_alpha(r) {return .Letter}
+	if unicode.is_number(r) {return .Letter}
 
 	switch r {
 	case '`', '~', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '-', '=', '[', ']', '\\', '{',
@@ -866,13 +905,13 @@ UiPhase :: enum {
 // Do let me know if there is a better way to center UI :)
 UI_PHASES :: []UiPhase { .Measure, .Draw }
 
-draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, color: Color, fmt: cstring, args: ..any) -> f32 {
+draw_text :: proc(phase: UiPhase, cursor: Vec2, font_size: f32, color: Color, fmt: cstring, args: ..any, alignment : f32 = 0) -> f32 {
 	text  := rl.TextFormat(fmt, ..args)
 	width := rl.MeasureTextEx(font, text, font_size, 0).x
 	if phase == .Draw {
-		rl.DrawTextEx(font, text, cursor, font_size, 0, color)
+		rl.DrawTextEx(font, text, cursor + {-width * alignment, 0}, font_size, 0, color)
 	}
-	return f32(width)
+	return f32(width) * (1 - 2 * alignment)
 }
 
 rlIsKeyPressedOrRepeated :: proc(key: rl.KeyboardKey) -> bool {
@@ -910,61 +949,22 @@ draw_letter_highlight :: proc(cursor: Vec2, width, spacing, vertical_spacing, fo
 	)
 }
 
-run_collection_selector :: proc(state: ^State) {
-	if len(state.available_collections) == 0 { return }
-
-	center    := state.size / 2
-	font_size := state.size.y * 0.1
-	vertical_spacing  := font_size / 5
-
-	cursor_start := Vec2{ center.x, 10 }
-
-	switch{
-	case rlIsKeyPressedOrRepeated(.DOWN): state.collection_idx += 1
-	case rlIsKeyPressedOrRepeated(.UP):   state.collection_idx -= 1
-	case rlIsKeyPressedOrRepeated(.ENTER): 
-		load_collection(state, &state.available_collections[state.collection_idx])
-		state.view = .Samples
-	case rlIsKeyPressedOrRepeated(.ESCAPE):
-		state.requested_quit = true
-	}
-	state.collection_idx = math.clamp(state.collection_idx, 0, len(state.available_collections) - 1)
-
-	rl.ClearBackground(COLOR_BG)
-
-	cursor : Vec2
-	cursor_selected : Vec2
-	for phase in UI_PHASES {
-		if phase == .Draw {
-			cursor = { cursor_start.x, center.y - cursor_selected.y - font_size / 2 }
-		}
-
-		for &collection, idx in state.available_collections {
-			selected := idx == state.collection_idx
-			size := draw_centered_label(state, phase, cursor, font_size, collection.name, selected=selected)
-			if phase == .Measure && selected {
-				cursor_selected = cursor
-			}
-
-			cursor += { 0, size.y }
-		}
-	}
-
-	// Top bar
-	top_corner := Vec2{0, 0}
-	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a collection", selected=true, selected_bg=COLOR_BG)
-}
-
-start_typing :: proc(state: ^State) {
+start_typing :: proc(state: ^State, sample: ^Sample) {
 	state.view = .Typing
+
 	typing := &state.typing
-	typing.sample = &state.available_samples[state.sample_idx]
+	typing.sample = sample
+	assert(typing.sample != nil)
+
 	typing.started_time = rl.GetTime()
 	typing.completed = false
+	typing.perfect = true
 	clear(&typing.typed)
 	clear(&typing.copied)
 	clear_undo_buffer(typing)
 	set_cursor_pos(typing, 0, false)
+
+	debug_log("started typing")
 }
 
 clear_undo_buffer :: proc(typing: ^TypingState) {
@@ -978,50 +978,125 @@ clear_undo_buffer :: proc(typing: ^TypingState) {
 }
 
 run_sample_selector :: proc(state: ^State) {
-	if len(state.available_samples) == 0 { return }
-
-	center    := state.size / 2
-	font_size := state.size.y * 0.1
-	vertical_spacing  := font_size / 5
-
+	rl.ClearBackground(COLOR_BG)
+	window_size := state.size
+	center      := window_size / 2
+	tc := create_text_config(0.05, window_size)
 	cursor_start := Vec2{ center.x, 10 }
 
 	switch{
-	case rlIsKeyPressedOrRepeated(.DOWN): state.sample_idx += 1
-	case rlIsKeyPressedOrRepeated(.UP):   state.sample_idx -= 1
+	case rlIsKeyPressedOrRepeated(.DOWN): state.item_idx += 1
+	case rlIsKeyPressedOrRepeated(.UP):   state.item_idx -= 1
 	case rlIsKeyPressedOrRepeated(.ENTER): 
-		start_typing(state)
+		current_item := state.available_items[state.item_idx]
+		switch current_item.type {
+		case .Sample:
+			start_typing(state, current_item.sample)
+		case .Collection:
+			new_path, err := filepath.join([]string{state.current_path.path, current_item.name}, context.allocator)
+			assert(err == nil)
+
+			debug_log("new path %v", new_path)
+			state.current_path = new_clone(CurrentPath{parent = state.current_path, path   = new_path})
+			load_directory_or_file(state, state.current_path.path)
+		}
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
-		state.view = .Collections
+		if state.current_path.parent != nil {
+			prev_path := state.current_path
+			state.current_path = prev_path.parent
+			delete(prev_path.path)
+			free(prev_path)
+			load_directory_or_file(state, state.current_path.path)
+		} else {
+			state.requested_quit = true
+		}
 	}
-	state.sample_idx = math.clamp(state.sample_idx, 0, len(state.available_samples) - 1)
 
-	rl.ClearBackground(COLOR_BG)
+	if len(state.available_items) == 0 {
+		draw_text(.Draw, center, tc.font_size, COLOR_FG, "No items available")
+		return
+	}
 
-	cursor : Vec2
+	state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
+
+	cursor          : Vec2
 	cursor_selected : Vec2
+	max_width       : f32
+	col_1_offset    : f32
 	for phase in UI_PHASES {
 		if phase == .Draw {
 			cursor = {
 				cursor_start.x,
-				cursor_start.y + center.y - cursor_selected.y - font_size / 2
+				cursor_start.y + center.y - cursor_selected.y - tc.font_size / 2
 			}
 		}
 
-		for &sample, idx in state.available_samples {
-			selected := idx == state.sample_idx
-			size := draw_centered_label(state, phase, cursor, font_size, sample.name, selected=selected)
+		for &item, idx in state.available_items {
+			selected := idx == state.item_idx
+
+			cursor_start := cursor_start
+			if phase == .Draw {
+				cursor_start -= max_width / 2
+			}
+
+			cursor.x = cursor_start.x
+
+			if phase == .Draw && selected {
+				rl.DrawRectangleV(cursor, {max_width, tc.font_size}, COLOR_BG2)
+			}
+
+			cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "%v", item.name)
+
+			cursor.x += 80
+
+			if phase == .Measure {
+				col_1_offset = math.max(col_1_offset, cursor.x - cursor_start.x)
+			} else {
+				cursor.x = cursor_start.x + col_1_offset
+			}
+
+			if item.sample != nil {
+				sample := item.sample
+				if sample.personal_best != 0 {
+					cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "%.3f", sample.personal_best)
+
+					cursor.x += 80
+
+					if sample.perfect {
+						cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "[perfect]")
+					}
+				} else {
+					cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "no record set")
+				}
+			} else {
+				cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "collection")
+			}
+
+			if phase == .Measure {
+				max_width = math.max(max_width, cursor.x - cursor_start.x)
+			}
+
 			if phase == .Measure && selected {
 				cursor_selected = cursor
 			}
 
-			cursor += { 0, size.y }
+			cursor += tc.row_offset
 		}
 	}
 
 	// Top bar
-	top_corner := Vec2{0, 0}
-	draw_centered_label(state, .Draw, {state.size.x / 2, 0}, font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
+	{
+		top_corner := Vec2{0, 0}
+
+		cursor := top_corner
+		draw_centered_label(state, .Draw, {state.size.x / 2, 0}, tc.font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
+
+		cursor += tc.row_offset
+
+
+		// Breadcrumb
+		draw_text(.Draw, cursor, tc.font_size, COLOR_FG, "%v", state.current_path.path)
+	}
 }
 
 draw_centered_label :: proc(
@@ -1074,12 +1149,37 @@ pull_float :: proc(str: ^string) -> (val: f32, ok: bool) {
 	return
 }
 
-load_progress :: proc(collection: ^Collection, sample: ^Sample) {
-	progress_path := slashpath.join({".", "progress", collection.name, sample.name}, context.temp_allocator)
+get_first_segment :: proc(path: string) -> string {
+	path := path
+	for {
+		a1, _ := filepath.split(path)
+		if a1 == "" {break}
 
-	progress_text_bytes, err := os.read_entire_file_from_path(progress_path, context.temp_allocator)
+		path = a1
+	}
+
+	return path
+}
+
+get_progress_path :: proc(sample: ^Sample, allocator : mem.Allocator) -> string {
+	progress_relative_path := sample.relative_path[len(COLLECTIONS_PATH):]
+	progress_path, fp_err  := filepath.join({".", "progress", progress_relative_path}, allocator)
+	assert(fp_err == nil)
+
+	debug_log("progress path: %v, rel pat %v", progress_path, progress_relative_path)
+
+	return progress_path
+}
+
+// It's important that relative_sample_path is relative to the current working dir
+load_progress :: proc(sample: ^Sample) {
+	progress_path := get_progress_path(sample, context.allocator)
+	defer delete(progress_path)
+
+	progress_text_bytes, err := os.read_entire_file_from_path(progress_path, context.allocator)
+	defer delete(progress_text_bytes)
 	if err != .FILE_NOT_FOUND && err != .Not_Exist && err != nil {
-		debug_log("load error %v", err)
+		debug_log("load error %v path %v", err)
 		return
 	}
 
@@ -1087,30 +1187,37 @@ load_progress :: proc(collection: ^Collection, sample: ^Sample) {
 	personal_best, ok := pull_float(&progress_text)
 	if ok {
 		sample.personal_best = personal_best
+
+		perfect, ok := pull_float(&progress_text)
+		if ok {
+			sample.perfect = perfect == 1
+		}
+
 		debug_log("loaded pb %v", personal_best)
 	}
 }
 
-save_progress :: proc(collection: ^Collection, sample: ^Sample) {
+save_progress :: proc(state: ^State, sample: ^Sample) {
 	debug_log("saving new pb: %v, %v", sample.name, sample.personal_best)
 
 	if IS_DEBUGGING_NEW_RECORD {return}
 
-	progress_path := slashpath.join({".", "progress", collection.name, sample.name}, context.temp_allocator)
-	progress_dir  := slashpath.dir(progress_path, context.temp_allocator)
+	progress_path := get_progress_path(sample, context.allocator)
+	defer delete(progress_path)
 
 	{
-		err := os.make_directory_all(progress_dir)
-		if err != nil {return}
+		progress_dir  := filepath.dir(progress_path, context.allocator)
+		defer delete(progress_dir)
+
+		make_directory_err := os.make_directory_all(progress_dir)
+		if make_directory_err != nil {return}
 	}
 
-	{
-		err := os.write_entire_file_from_string(
-			progress_path,
-			fmt.aprintf("%v", sample.personal_best, allocator=context.temp_allocator),
-		)
-		if err != nil {return}
-	}
+	file_text := fmt.aprintf("%v,%v", sample.personal_best, sample.perfect ? 1 : 0, allocator=context.allocator)
+	defer delete(file_text)
+
+	err := os.write_entire_file_from_string(progress_path, file_text)
+	if err != nil {return}
 }
 
 DrawTextResult :: struct {
@@ -1222,6 +1329,12 @@ draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState
 
 		is_wrong := has_typed && (target_char != typed_char || !has_target)
 
+		// NOTE: Mutating while rendering is typically wrong.
+		// Should be fine here tho
+		if is_wrong {
+			typing.perfect = false
+		}
+
 		if phase == .Draw {
 			char := target_char
 			col  := COLOR_TARGET
@@ -1281,4 +1394,53 @@ draw_single_character_with_highlight :: proc(
 	} else {
 		draw_text(.Draw, cursor, tc.font_size, col, "%c", char)
 	}
+}
+
+main :: proc() {
+	when IS_DEBUGGING_ALLOCATIONS {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer {
+			if len(track.allocation_map) > 0 {
+				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
+				for _, entry in track.allocation_map {
+					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
+				}
+			}
+			mem.tracking_allocator_destroy(&track)
+		}
+	}
+	
+	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_HIGHDPI})
+	rl.InitWindow(0, 0, "RoboType")
+	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
+	rl.SetExitKey(.KEY_NULL)
+
+	last_monitor = -1
+
+	set_logging_type(.Fmt)
+
+	defer rl.CloseWindow()
+
+	state := load_game_state()
+
+	for !rl.WindowShouldClose() && !state.requested_quit {
+		monitor := rl.GetCurrentMonitor()
+		if last_monitor != monitor {
+			last_monitor = monitor
+			rl.SetTargetFPS(rl.GetMonitorRefreshRate(monitor))
+		}
+
+		state.size.x = f32(rl.GetScreenWidth())
+		state.size.y = f32(rl.GetScreenHeight())
+		state.dt     = rl.GetFrameTime();
+
+		rl.BeginDrawing(); {
+			run_game(state)
+		} rl.EndDrawing();
+	}
+
+	free_all(state.available_samples_allocator)
 }

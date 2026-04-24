@@ -3,6 +3,8 @@ package main
 import "core:log"
 import "core:fmt"
 
+ENABLE_LOGS :: true
+
 LoggingType :: enum {
 	None,
 	Logger,
@@ -16,6 +18,8 @@ set_logging_type :: proc(type: LoggingType) {
 }
 
 debug_log :: proc(format: string, args: ..any, location := #caller_location, type := logging_type) {
+	if !ENABLE_LOGS {return}
+
 	switch logging_type {
 	case .None:
 	case .Logger:
