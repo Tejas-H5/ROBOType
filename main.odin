@@ -53,6 +53,7 @@ LoadableItem :: struct {
 CurrentPath :: struct {
 	parent : ^CurrentPath,
 	path: string,
+	item_idx : int,
 }
 
 State :: struct {
@@ -796,7 +797,7 @@ run_typing :: proc(state: ^State) {
 		rl.DrawRectangleV(cursor, {window_size.x, height}, COLOR_BG)
 		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, typing.duration)
 		if typing.perfect {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " You made no mistakes. ", typing.sample.name, typing.duration)
+			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " You made no mistakes. ")
 		}
 
 		if typing.duration < typing.prev_duration {
@@ -985,8 +986,17 @@ run_sample_selector :: proc(state: ^State) {
 	cursor_start := Vec2{ center.x, 10 }
 
 	switch{
-	case rlIsKeyPressedOrRepeated(.DOWN): state.item_idx += 1
-	case rlIsKeyPressedOrRepeated(.UP):   state.item_idx -= 1
+	case rlIsKeyPressedOrRepeated(.DOWN): 
+		num_items := len(state.available_items)
+		state.item_idx += 1
+		if state.item_idx > num_items {
+			state.item_idx = num_items -1
+		}
+	case rlIsKeyPressedOrRepeated(.UP):   
+		state.item_idx -= 1
+		if state.item_idx < 0 {
+			state.item_idx = 0
+		}
 	case rlIsKeyPressedOrRepeated(.ENTER): 
 		current_item := state.available_items[state.item_idx]
 		switch current_item.type {
@@ -997,13 +1007,16 @@ run_sample_selector :: proc(state: ^State) {
 			assert(err == nil)
 
 			debug_log("new path %v", new_path)
+			state.current_path.item_idx = state.item_idx
 			state.current_path = new_clone(CurrentPath{parent = state.current_path, path   = new_path})
+			state.item_idx = 0
 			load_directory_or_file(state, state.current_path.path)
 		}
 	case rlIsKeyPressedOrRepeated(.ESCAPE):
 		if state.current_path.parent != nil {
 			prev_path := state.current_path
 			state.current_path = prev_path.parent
+			state.item_idx = state.current_path.item_idx
 			delete(prev_path.path)
 			free(prev_path)
 			load_directory_or_file(state, state.current_path.path)
@@ -1017,8 +1030,6 @@ run_sample_selector :: proc(state: ^State) {
 		return
 	}
 
-	state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
-
 	cursor          : Vec2
 	cursor_selected : Vec2
 	max_width       : f32
@@ -1030,6 +1041,10 @@ run_sample_selector :: proc(state: ^State) {
 				cursor_start.y + center.y - cursor_selected.y - tc.font_size / 2
 			}
 		}
+
+		// current folder
+		draw_text(phase, {center.x, cursor.y}, tc.font_size, COLOR_FG, ".%v%v", filepath.SEPARATOR, state.current_path.path, alignment=0.5)
+		cursor += tc.row_offset
 
 		for &item, idx in state.available_items {
 			selected := idx == state.item_idx
@@ -1087,15 +1102,15 @@ run_sample_selector :: proc(state: ^State) {
 	// Top bar
 	{
 		top_corner := Vec2{0, 0}
-
 		cursor := top_corner
-		draw_centered_label(state, .Draw, {state.size.x / 2, 0}, tc.font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
 
-		cursor += tc.row_offset
+		{
+			tc := create_text_config(0.1, window_size)
+			draw_centered_label(state, .Draw, {state.size.x / 2, 0}, tc.font_size, "ROBOType", selected=true, selected_bg=COLOR_BG)
+			cursor += tc.row_offset
+		}
 
-
-		// Breadcrumb
-		draw_text(.Draw, cursor, tc.font_size, COLOR_FG, "%v", state.current_path.path)
+		draw_centered_label(state, .Draw, {state.size.x / 2, cursor.y}, tc.font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
 	}
 }
 
