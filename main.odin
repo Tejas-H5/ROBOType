@@ -14,15 +14,18 @@ import "core:c"
 import rl "vendor:raylib"
 
 ANIMATE_SPEED            :: 0.5
-IS_DEBUGGING_COMPLETION  :: false
 IS_DEBUGGING_NEW_RECORD  :: false
 IS_DEBUGGING_UNDO_BUFFER :: false
 IS_DEBUGGING_ALLOCATIONS :: false
-IS_DEBUGGING_ERRROR      :: 1
+IS_DEBUGGING_ERRROR      :: 0
+
+IS_DEBUGGING_FILE        :: "collections/programming/odin/hellope.odin"
+IS_DEBUGGING_COMPLETION  :: false
 
 COLLECTIONS_PATH :: "collections"
 
 NEWLINE_STR :: "\\n"
+TAB_STR     :: "->"
 
 DRAW_MODE :: TextDrawMode.Overlayed
 
@@ -73,7 +76,6 @@ State :: struct {
 
 	// NOTE: all this stuff needs a total rework.
 	current_path : ^CurrentPath,
-	load_sample  : ^Sample,
 
 	available_items : [dynamic]LoadableItem,
 	item_idx        : int,
@@ -171,22 +173,25 @@ load_game_state :: proc() -> ^State {
 	state.view = .Samples
 	load_directory_or_file(state, COLLECTIONS_PATH)
 
-	if IS_DEBUGGING_COMPLETION {
-		// Airdrop ourselves right to the end
-		load_directory_or_file(state, "collections/programming/odin/hellope.odin")
-		n := len(state.typing.sample.text)
-		for char, idx in state.typing.sample.text {
-			if idx == n -1 {break}
-			insert_text(&state.typing, len(state.typing.typed), []byte{ char })
-		}
-		set_cursor_pos(&state.typing, n, false)
-	}
+	if IS_DEBUGGING_FILE != "" {
+		load_directory_or_file(state, IS_DEBUGGING_FILE)
 
+		if IS_DEBUGGING_COMPLETION {
+			n := len(state.typing.sample.text)
+			for char, idx in state.typing.sample.text {
+				if idx == n -1 {break}
+				insert_text(&state.typing, len(state.typing.typed), []byte{ char })
+			}
+			set_cursor_pos(&state.typing, n, false)
+		}
+	}
 
 	return state
 }
 
 load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
+	debug_log("loading path %v ...", relative_path)
+
 	stat, stat_err := os.stat(relative_path, context.allocator)
 	defer os.file_info_delete(stat, context.allocator)
 	if stat_err != nil || IS_DEBUGGING_ERRROR == 1 {
@@ -198,12 +203,9 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
 	arena := state.available_samples_allocator
 	free_all(arena)
 	clear(&state.available_items)
-	debug_log("cleared the arena")
 
 	#partial switch stat.type {
 	case .Regular:
-		debug_log("loading sample %v ...", stat.name)
-
 		sample := load_sample(state, relative_path, arena)
 		item   := LoadableItem{name=strings.clone(stat.name, arena), type=.Sample, sample=sample}
 		append(&state.available_items, item)
@@ -268,6 +270,8 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
 
 
 load_sample :: proc(state: ^State, relative_path: string, allocator : mem.Allocator) -> ^Sample {
+	debug_log("loading sample %v ...", relative_path)
+
 	text, err := os.read_entire_file_from_path(relative_path, context.allocator)
 	defer delete(text)
 	fmt.assertf(err == nil, "err wasnt nil: %v", err)
@@ -322,13 +326,13 @@ make_undo_entry :: proc(typing: ^TypingState, idx: int, value: []u8, insert: boo
 	append(&typing.undo_buffer, undo_entry)
 	typing.undo_idx += 1
 
-	if insert {
-		debug_log("logging insert %v", string(value))
-	} else {
-		debug_log("logging delete %v", string(value))
-	}
-
 	if IS_DEBUGGING_UNDO_BUFFER {
+		if insert {
+			debug_log("logging insert %v", string(value))
+		} else {
+			debug_log("logging delete %v", string(value))
+		}
+
 		debug_log("-------------")
 		for entry in typing.undo_buffer {
 			debug_log("idx=%v, value= %v, insert=%v", entry.idx, string(entry.value), entry.insert)
@@ -433,8 +437,6 @@ run_typing :: proc(state: ^State) {
 
 	// Input
 	if !typing.completed {
-		// TODO: Moving up and down lines! (hard feature)
-		// TODO: Tab
 		// TODO: VIM bindings support
 
 		shift_down := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
@@ -551,10 +553,8 @@ run_typing :: proc(state: ^State) {
 				undo_entry := typing.undo_buffer[typing.undo_idx]
 				assert(undo_entry != nil)
 				if undo_entry.insert {
-					debug_log("deleting fr fr")
 					delete_text(typing, {undo_entry.idx, undo_entry.idx + len(undo_entry.value)}, is_undo = true)
 				} else {
-					debug_log("inserting. wtf")
 					insert_text(typing, undo_entry.idx, undo_entry.value, is_undo = true)
 				}
 			}
@@ -565,10 +565,8 @@ run_typing :: proc(state: ^State) {
 				undo_entry := typing.undo_buffer[typing.undo_idx]
 				assert(undo_entry != nil)
 				if undo_entry.insert {
-					debug_log("inserting fr fr")
 					insert_text(typing, undo_entry.idx, undo_entry.value, is_undo = true)
 				} else {
-					debug_log("deleting wt")
 					delete_text(typing, {undo_entry.idx, undo_entry.idx + len(undo_entry.value)}, is_undo = true)
 				}
 
@@ -620,6 +618,10 @@ run_typing :: proc(state: ^State) {
 
 		if rlIsKeyPressedOrRepeated(.ENTER) {
 			type_char(typing, '\n')
+		}
+
+		if rlIsKeyPressedOrRepeated(.TAB) {
+			type_char(typing, '\t')
 		}
 
 		curr_len := len(typing.typed)
@@ -865,13 +867,16 @@ LetterType :: enum {
 	Other,
 	Whitespace,
 	Newline,
+	Indentation,
 	Letter,
 	Punctuation,
 }
 
+// Restrict to a limited subset of valid characters.
 get_letter_type :: proc(b: byte) -> LetterType {
 	r := rune(b)
 
+	if r == '\t' {return .Indentation}
 	if r == '\n' {return .Newline}
 	if r == ' '  {return .Whitespace }
 
@@ -991,8 +996,8 @@ start_typing :: proc(state: ^State, sample: ^Sample) {
 
 	typing.next_sample_idx = 0
 	typing.next_sample     = nil
-	if state.available_items[state.item_idx].sample == sample {
-		n := len(state.available_items)
+	n := len(state.available_items)
+	if state.item_idx + 1 < n && state.available_items[state.item_idx].sample == sample {
 		for idx in state.item_idx+1..<n {
 			item := state.available_items[idx]
 			if item.type == .Sample {
@@ -1044,7 +1049,6 @@ run_sample_selector :: proc(state: ^State) {
 			new_path, err := filepath.join([]string{state.current_path.path, current_item.name}, context.allocator)
 			assert(err == nil)
 
-			debug_log("new path %v", new_path)
 			state.current_path.item_idx = state.item_idx
 			state.current_path = new_clone(CurrentPath{parent = state.current_path, path   = new_path})
 			state.item_idx = 0
@@ -1236,6 +1240,7 @@ load_progress :: proc(sample: ^Sample) {
 	defer delete(progress_text_bytes)
 	if err != .FILE_NOT_FOUND && err != .Not_Exist && err != nil {
 		debug_log("load error %v path %v", err)
+		// Not a big deal.
 		return
 	}
 
@@ -1249,12 +1254,12 @@ load_progress :: proc(sample: ^Sample) {
 			sample.perfect = perfect == 1
 		}
 
-		debug_log("loaded pb %v", personal_best)
+		debug_log("loaded pb=%v, perfect=%v", personal_best, perfect)
 	}
 }
 
 save_progress :: proc(state: ^State, sample: ^Sample) {
-	debug_log("saving new pb: %v, %v", sample.name, sample.personal_best)
+	debug_log("saving new pb: %v, %v, %v", sample.name, sample.personal_best, sample.perfect)
 
 	if IS_DEBUGGING_NEW_RECORD {return}
 
@@ -1326,6 +1331,8 @@ draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState
 		lo, hi         := get_lo_hi(typing.range)
 		is_highlighted := lo <= typed_idx && typed_idx < hi
 
+		just_blocked_typed := false
+
 		finished_drawing_line := false
 		if target_is_newline_or_end && typed_is_newline_or_end {
 			if !block_target && !block_typed {
@@ -1338,23 +1345,14 @@ draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState
 		} else if target_is_newline_or_end {
 			block_target = true
 		} else if typed_is_newline_or_end {
-			block_typed = true
+			if !block_typed {
+				just_blocked_typed = true
+				block_typed = true
+			}
 		}
 
 		defer if !block_typed  { typed_idx  += 1 }
 		defer if !block_target { target_idx += 1 }
-
-		measure_letter :: proc(char: byte, tc: TextConfig, has: bool) -> f32 {
-			if !has {return 0}
-
-			width : f32
-			if char == '\n' {
-				width = draw_text(.Measure, {}, tc.font_size / 2, {}, "%v", {})
-			} else {
-				width = draw_text(.Measure, {}, tc.font_size, {}, "%c", char)
-			}
-			return width
-		}
 
 		width := math.max(
 			measure_letter(typed_char, tc, has_typed && !block_typed),
@@ -1380,10 +1378,18 @@ draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState
 			}
 		}
 
+		has_typed_unblocked := has_typed
 		if block_typed  {has_typed  = false}
 		if block_target {has_target = false}
 
-		is_wrong := has_typed && (target_char != typed_char || !has_target)
+		is_wrong := false
+		if has_typed && has_target {
+			is_wrong = target_char != typed_char
+		} else if just_blocked_typed {
+			if has_typed_unblocked {
+				is_wrong = target_char != typed_char
+			}
+		}
 
 		// NOTE: Mutating while rendering is typically wrong.
 		// Should be fine here tho
@@ -1447,9 +1453,26 @@ draw_single_character_with_highlight :: proc(
 		if draw_newline {
 			draw_text(.Draw, cursor + {0, tc.font_size / 4}, tc.font_size / 2, col, NEWLINE_STR)
 		}
+	} else if char == '\t' {
+		draw_text(.Draw, cursor + {width/2, tc.font_size / 4}, tc.font_size / 2, col, TAB_STR, alignment = 0.5)
 	} else {
 		draw_text(.Draw, cursor, tc.font_size, col, "%c", char)
 	}
+}
+
+measure_letter :: proc(char: byte, tc: TextConfig, has: bool) -> f32 {
+	if !has {return 0}
+
+	width : f32
+	if char == '\n' {
+		width = draw_text(.Measure, {}, tc.font_size / 2, {}, "%v", {})
+	} else if char == '\t' {
+		// 4 width is my preferred when actually coding, but I think it wastes too much space visually
+		width = draw_text(.Measure, {}, tc.font_size, {}, " ") * 4
+	} else {
+		width = draw_text(.Measure, {}, tc.font_size, {}, "%c", char)
+	}
+	return width
 }
 
 main :: proc() {
