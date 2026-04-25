@@ -18,6 +18,7 @@ IS_DEBUGGING_COMPLETION  :: false
 IS_DEBUGGING_NEW_RECORD  :: false
 IS_DEBUGGING_UNDO_BUFFER :: false
 IS_DEBUGGING_ALLOCATIONS :: false
+IS_DEBUGGING_ERRROR      :: 1
 
 COLLECTIONS_PATH :: "collections"
 
@@ -65,6 +66,8 @@ State :: struct {
 	requested_quit : bool,
 	size           : Vec2,
 	dt             : f32,
+
+	error : string,
 
 	view: View,
 
@@ -183,12 +186,12 @@ load_game_state :: proc() -> ^State {
 	return state
 }
 
-load_directory_or_file :: proc(state: ^State, relative_path: string) {
-	stat, star_err := os.stat(relative_path, context.allocator)
+load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
+	stat, stat_err := os.stat(relative_path, context.allocator)
 	defer os.file_info_delete(stat, context.allocator)
-	if star_err != nil {
-		// TODO: Handle error
-		assert(false)
+	if stat_err != nil || IS_DEBUGGING_ERRROR == 1 {
+		state.error = fmt.aprintf("Couldn't read path info %v: %v", relative_path, stat_err)
+		return false
 	}
 
 	// TODO: validate
@@ -212,8 +215,11 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 		state.typing.sample = nil
 
 		files, err := os.read_all_directory_by_path(relative_path, context.allocator)
-		assert(err == nil)
 		defer os.file_info_slice_delete(files, context.allocator)
+		if err != nil || IS_DEBUGGING_ERRROR == 2 {
+			state.error = fmt.aprintf("Couldn't read path %v: %v", relative_path, stat_err)
+			return false
+		}
 
 		for fi in files {
 			relative_path, err := filepath.join([]string{relative_path, fi.name}, context.allocator)
@@ -233,7 +239,6 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 				// Only include the directory as a collection if it's got at least 1 item
 				dirs, err := os.read_directory(file, 1, context.allocator)
 				defer os.file_info_slice_delete(dirs, context.allocator)
-
 				if err != nil || len(dirs) == 0 {
 					continue
 				}
@@ -258,7 +263,7 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 		})
 	}
 
-	return
+	return true
 }
 
 
@@ -384,6 +389,28 @@ get_lo_hi :: proc(range: SelectionRange) -> (int, int) {
 run_game :: proc(state: ^State) {
 	if state.requested_quit {return;}
 
+	rl.ClearBackground(COLOR_BG)
+
+	if state.error != "" {
+		window_size := state.size
+		tc	:= create_text_config(0.05, window_size)
+
+		cursor := Vec2{window_size.x / 2, window_size.y * 0.1}
+
+		line_length := 50
+		for idx := 0; idx < len(state.error); idx += line_length {
+			end := math.min(idx + line_length, len(state.error))
+			draw_text(.Draw, cursor, tc.font_size, COLOR_FG, "%v", state.error[idx:end], alignment=0.5)
+			cursor += tc.row_offset
+		}
+
+		if rlIsKeyPressedOrRepeated(.ESCAPE) {
+			state.requested_quit = true
+		}
+
+		return
+	}
+
 	switch state.view {
 	case .Samples:     run_sample_selector(state)
 	case .Typing:      run_typing(state)
@@ -398,7 +425,6 @@ run_typing :: proc(state: ^State) {
 	dt          := state.dt
 	tc := create_text_config(0.06, window_size)
 
-	rl.ClearBackground(COLOR_BG)
 
 	if typing.sample == nil {
 		draw_text(.Draw, center, tc.font_size, COLOR_FG, "Sample was not set!")
@@ -992,7 +1018,6 @@ clear_undo_buffer :: proc(typing: ^TypingState) {
 }
 
 run_sample_selector :: proc(state: ^State) {
-	rl.ClearBackground(COLOR_BG)
 	window_size := state.size
 	center      := window_size / 2
 	tc := create_text_config(0.05, window_size)
