@@ -44,6 +44,12 @@ LoadableItemType :: enum {
 	Sample,
 }
 
+@(rodata)
+LOADABLE_ITEM_ORDER := [LoadableItemType]int {
+	.Sample     = 0,
+	.Collection = 1,
+}
+
 LoadableItem :: struct {
 	name: string,
 	type: LoadableItemType,
@@ -89,6 +95,9 @@ UndoEntry :: struct {
 
 TypingState :: struct {
 	sample: ^Sample,
+	next_sample_idx : int,
+	next_sample     : ^Sample,
+
 
 	// NOTE: make sure that the font is monospace, so that we can display the
 	// target letter right above what was actually typed, without any letter spacing issues
@@ -245,9 +254,10 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 	}
 
 	if len(state.available_items) > 0 {
+
 		slice.sort_by(state.available_items[:], proc(a, b: LoadableItem) -> bool {
 			if a.type != b.type {
-				return int(a.type) < int(b.type);
+				return LOADABLE_ITEM_ORDER[a.type] < LOADABLE_ITEM_ORDER[b.type]
 			}
 
 			return strings.compare(a.name, b.name) < 0
@@ -645,9 +655,8 @@ run_typing :: proc(state: ^State) {
 		}
 	} else if typing.completed {
 		if rlIsKeyPressedOrRepeated(.ENTER) {
-			// NOTE: only works because of how we sort samples to the bottom of the items list.
-			// TODO: more nicer to compute this item once we transition to a particular itm
 			n := len(state.available_items)
+
 			if state.item_idx < n - 1 {
 				state.item_idx += 1
 				start_typing(state, typing.sample)
@@ -660,19 +669,15 @@ run_typing :: proc(state: ^State) {
 		}
 	}
 
-
-
 	cursor_start := Vec2{ tc.spacing, tc.spacing }
 	character_width := f32(rl.MeasureTextEx(font, "w", tc.font_size, 0).x)
 
 	typing.blink_time += dt
 
-
 	start_caret_at, end_caret_at : Vec2
 	cursor := cursor_start
 
 	counter += 1
-
 
 	for phase in UI_PHASES { 
 		cursor = cursor_start
@@ -965,6 +970,21 @@ start_typing :: proc(state: ^State, sample: ^Sample) {
 	clear_undo_buffer(typing)
 	set_cursor_pos(typing, 0, false)
 
+	typing.next_sample_idx = 0
+	typing.next_sample     = nil
+	if state.available_items[state.item_idx].sample == sample {
+		n := len(state.available_items)
+		for idx in state.item_idx+1..<n {
+			item := state.available_items[idx]
+			if item.type == .Sample {
+				assert(item.sample != nil)
+				typing.next_sample_idx = idx
+				typing.next_sample     = item.sample
+				break
+			}
+		}
+	}
+
 	debug_log("started typing")
 }
 
@@ -1030,10 +1050,10 @@ run_sample_selector :: proc(state: ^State) {
 		return
 	}
 
-	cursor          : Vec2
-	cursor_selected : Vec2
-	max_width       : f32
-	col_1_offset    : f32
+	cursor           : Vec2
+	cursor_selected  : Vec2
+	remaining_offset : f32
+	col1_offset      : f32
 	for phase in UI_PHASES {
 		if phase == .Draw {
 			cursor = {
@@ -1042,6 +1062,21 @@ run_sample_selector :: proc(state: ^State) {
 			}
 		}
 
+		// Top bar
+		if state.current_path.parent == nil {
+			{
+				tc := create_text_config(0.1, window_size)
+				draw_centered_label(state, phase, {state.size.x / 2, cursor.y}, tc.font_size, "ROBOType", selected=true, selected_bg=COLOR_BG)
+				cursor += tc.row_offset
+			}
+
+			draw_centered_label(state, phase, {state.size.x / 2, cursor.y}, tc.font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
+			cursor += tc.row_offset
+
+			cursor.y += window_size.y * 0.1
+		}
+
+
 		// current folder
 		draw_text(phase, {center.x, cursor.y}, tc.font_size, COLOR_FG, ".%v%v", filepath.SEPARATOR, state.current_path.path, alignment=0.5)
 		cursor += tc.row_offset
@@ -1049,9 +1084,11 @@ run_sample_selector :: proc(state: ^State) {
 		for &item, idx in state.available_items {
 			selected := idx == state.item_idx
 
+			max_width := col1_offset - cursor_start.x + remaining_offset
+
 			cursor_start := cursor_start
 			if phase == .Draw {
-				cursor_start -= max_width / 2
+				cursor_start.x -= max_width / 2
 			}
 
 			cursor.x = cursor_start.x
@@ -1064,10 +1101,11 @@ run_sample_selector :: proc(state: ^State) {
 
 			cursor.x += 80
 
+			this_col1_offset := cursor.x - cursor_start.x
 			if phase == .Measure {
-				col_1_offset = math.max(col_1_offset, cursor.x - cursor_start.x)
+				col1_offset = math.max(col1_offset, this_col1_offset)
 			} else {
-				cursor.x = cursor_start.x + col_1_offset
+				cursor.x = cursor_start.x + col1_offset
 			}
 
 			if item.sample != nil {
@@ -1075,20 +1113,19 @@ run_sample_selector :: proc(state: ^State) {
 				if sample.personal_best != 0 {
 					cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "%.3f", sample.personal_best)
 
-					cursor.x += 80
-
 					if sample.perfect {
+						cursor.x += 80
 						cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "[perfect]")
 					}
 				} else {
-					cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "no record set")
+					cursor.x += draw_text(.Measure, cursor, tc.font_size, COLOR_FG, "no record set")
 				}
 			} else {
 				cursor.x += draw_text(phase, cursor, tc.font_size, COLOR_FG, "collection")
 			}
 
 			if phase == .Measure {
-				max_width = math.max(max_width, cursor.x - cursor_start.x)
+				remaining_offset = math.max(remaining_offset, cursor.x - this_col1_offset)
 			}
 
 			if phase == .Measure && selected {
@@ -1097,20 +1134,6 @@ run_sample_selector :: proc(state: ^State) {
 
 			cursor += tc.row_offset
 		}
-	}
-
-	// Top bar
-	{
-		top_corner := Vec2{0, 0}
-		cursor := top_corner
-
-		{
-			tc := create_text_config(0.1, window_size)
-			draw_centered_label(state, .Draw, {state.size.x / 2, 0}, tc.font_size, "ROBOType", selected=true, selected_bg=COLOR_BG)
-			cursor += tc.row_offset
-		}
-
-		draw_centered_label(state, .Draw, {state.size.x / 2, cursor.y}, tc.font_size, "Choose a sample", selected=true, selected_bg=COLOR_BG)
 	}
 }
 

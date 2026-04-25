@@ -2,10 +2,7 @@ I've tried a bunch of typing practice programs over the years, none of them hand
 In an ideal world, the input field they give you should closely resemble the input field that you actually use day to day.
 This idea, pushed to it's logical limit, would result in a series of samples, with online leaderboards showing how quickly someone was able to complete it.
 
----
-
 Here's a quick tutorial for the uninformed.
-
 Assuming you know how to type, here are some things you may _not_ have known about:
 
 Arrow keys to navigate around the text.
@@ -25,11 +22,10 @@ Ctrl+W to delete the last word (Warning: don't use this in the browser).
 Those of you with those smaller keyboards that don't have HOME/END: 
 Sucks to be you.
 
-The plan is to add Vim bindings someday, so that we can finally figure out if vim is truly faster.
-They are very expansive though, so it may never happen.
+The plan is to add Vim bindings and an online leaderboard someday, so that we can finally figure out if vim is truly faster.
+It won't matter very much for typing out paragraphs, but there are other samples that rely on copy-pasting in order to get a better time.
 
----
+You can add your own collections in the /collections folder. They can be arbitrarily nested.
+Avoid making the samples too long, as they can be a pain to type out!
 
-You can add your own collections in the /collections folder.
-
-glhf
+GLHF.

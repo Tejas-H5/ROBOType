@@ -1,4 +1,4 @@
-package main
+package hellope
 
 import "core:fmt"
 
