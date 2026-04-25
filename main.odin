@@ -29,7 +29,6 @@ TextDrawMode :: enum {
 	Overlayed,
 }
 
-
 // TODO: remove asserts from the main path
 
 View :: enum {
@@ -153,11 +152,11 @@ COLOR_RED       :: Color{ 255, 0, 0, 255 }
 
 last_monitor : c.int
 
-
 load_game_state :: proc() -> ^State {
 	state := new(State)
-	mem.dynamic_arena_init(&state.available_samples_arena)
-	state.available_samples_allocator = mem.dynamic_arena_allocator(&state.available_samples_arena)
+	arena := &state.available_samples_arena
+	mem.dynamic_arena_init(arena)
+	state.available_samples_allocator = mem.dynamic_arena_allocator(arena)
 	state.current_path = new_clone(CurrentPath{path = COLLECTIONS_PATH})
 
 	// The truetype font as loaded by RayLib looks like ass for some reason. 
@@ -214,12 +213,7 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 
 		files, err := os.read_all_directory_by_path(relative_path, context.allocator)
 		assert(err == nil)
-		defer {
-			for fi in files {
-				os.file_info_delete(fi, context.allocator)
-			}
-			delete(files)
-		}
+		defer os.file_info_slice_delete(files, context.allocator)
 
 		for fi in files {
 			relative_path, err := filepath.join([]string{relative_path, fi.name}, context.allocator)
@@ -238,7 +232,7 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) {
 			case .Directory:
 				// Only include the directory as a collection if it's got at least 1 item
 				dirs, err := os.read_directory(file, 1, context.allocator)
-				defer delete(dirs)
+				defer os.file_info_slice_delete(dirs, context.allocator)
 
 				if err != nil || len(dirs) == 0 {
 					continue
@@ -338,9 +332,8 @@ make_undo_entry :: proc(typing: ^TypingState, idx: int, value: []u8, insert: boo
 }
 
 delete_undo_entry :: proc(entry: ^UndoEntry) {
-	if entry != nil {
-		delete(entry.value)
-	}
+	delete(entry.value)
+	free(entry)
 }
 
 Color :: rl.Color
@@ -1439,13 +1432,14 @@ main :: proc() {
 		track: mem.Tracking_Allocator
 		mem.tracking_allocator_init(&track, context.allocator)
 		context.allocator = mem.tracking_allocator(&track)
-
 		defer {
 			if len(track.allocation_map) > 0 {
 				fmt.eprintf("=== %v allocations not freed: ===\n", len(track.allocation_map))
 				for _, entry in track.allocation_map {
 					fmt.eprintf("- %v bytes @ %v\n", entry.size, entry.location)
 				}
+			} else {
+				fmt.eprintf("=== all allocations freed! no error ===\n")
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
@@ -1480,5 +1474,26 @@ main :: proc() {
 		} rl.EndDrawing();
 	}
 
-	free_all(state.available_samples_allocator)
+	when IS_DEBUGGING_ALLOCATIONS {
+		// I'de like the tracking allocator to ignore anything in the persistent stores.
+
+		path := state.current_path
+		for path != nil {
+			next_path := path.parent
+			free(path)
+			path = next_path
+		}
+
+		free_all(state.available_samples_allocator)
+		free(state)
+		mem.dynamic_arena_destroy(&state.available_samples_arena)
+		delete(state.available_items)
+
+		#reverse for item in state.typing.undo_buffer {
+			delete_undo_entry(item)
+		}
+		delete(state.typing.undo_buffer)
+		delete(state.typing.typed)
+		delete(state.typing.copied)
+	}
 }
