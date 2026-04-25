@@ -1385,10 +1385,10 @@ draw_text_overlayed :: proc(tc: TextConfig, phase: UiPhase, typing: ^TypingState
 		is_wrong := false
 		if has_typed && has_target {
 			is_wrong = target_char != typed_char
-		} else if just_blocked_typed {
-			if has_typed_unblocked {
-				is_wrong = target_char != typed_char
-			}
+		} else if has_typed && block_target {
+			is_wrong = true
+		} else if has_typed_unblocked && just_blocked_typed {
+			is_wrong = true
 		}
 
 		// NOTE: Mutating while rendering is typically wrong.
