@@ -1,0 +1,10 @@
+Write the simplest and most straightfoward code to solve the actual problem.
+Split out code into a separate function only when it improves the maintainability of _both_ sides of the contract. 
+Avoid splitting out code that would be better kept together.
+Use tests to speed up the development of harder problems.
+There will also be some UI code that an AI agent such as yourself can only get right by writing tests, since you can't actually use the UI.
+Write code that is self-documenting and self-contained where possible, such that extrenous documentation is not needed.
+When in doubt, prefer performance. It's far easier to make an overal performant codebase more correct, than it is to make 
+an unperformant-yet-correct codebase closer to optimal in performance.
+Keep the number of dependencies to a minimum, but do not avoid using dependencies.
+

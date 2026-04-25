@@ -14,13 +14,18 @@ import "core:c"
 import rl "vendor:raylib"
 
 ANIMATE_SPEED            :: 0.5
-IS_DEBUGGING_NEW_RECORD  :: false
+
+//// Debug flags
+
+WINDOWED                 :: false
 IS_DEBUGGING_UNDO_BUFFER :: false
 IS_DEBUGGING_ALLOCATIONS :: false
 IS_DEBUGGING_ERRROR      :: 0
 
-IS_DEBUGGING_FILE        :: "collections/programming/odin/hellope.odin"
+// IS_DEBUGGING_FILE        :: "collections/programming/odin/tracking_allocator.odin"
+IS_DEBUGGING_FILE        :: ""
 IS_DEBUGGING_COMPLETION  :: false
+IS_DEBUGGING_NEW_RECORD  :: false // Set to true to disable saving
 
 COLLECTIONS_PATH :: "collections"
 
@@ -32,8 +37,6 @@ DRAW_MODE :: TextDrawMode.Overlayed
 TextDrawMode :: enum {
 	Overlayed,
 }
-
-// TODO: remove asserts from the main path
 
 View :: enum {
 	Samples,
@@ -102,7 +105,6 @@ TypingState :: struct {
 	next_sample_idx : int,
 	next_sample     : ^Sample,
 
-
 	// NOTE: make sure that the font is monospace, so that we can display the
 	// target letter right above what was actually typed, without any letter spacing issues
 	typed       : [dynamic]byte,
@@ -113,20 +115,18 @@ TypingState :: struct {
 	blink_time : f32,
 	mutation_unhandled : bool,
 
-
-	// TODO: clipboard, undo, find out the remaining features.
-	// Not really necessary for a
-
 	offset_smooth : Vec2,
-	start_caret_at, end_caret_at : Vec2,
+	start_caret_at, end_caret_at : Vec2, // NOTE: kinda not used tbh
+	current_typed_height : f32,
 	is_animated                  : bool,
 
-	// NOTE: I actually don't care about the number of types I typed the wrong thing - 
+	// NOTE: I actually don't care about the number of times I typed the wrong thing - 
 	// Really, I just want to minimize the time. If the most optimal typing strategy actually
 	// invovles making shittone of mistakes and then editing them later, I don't want to be 
 	// penalized for getting one or two letters wrong actually.
 	// This is especially the case in the puzzle levels, that will rely heavily on moving the
 	// cursor around and copy-pasting stuff. 
+	// That being said, I think it would be cool to have a [perfect]. Its like an SS in a rhythm game
 	started_time  : f64,
 	perfect : bool,
 	duration : f32,
@@ -134,7 +134,7 @@ TypingState :: struct {
 	completed : bool,
 	animation_t : f32,
 	animation_new_record : f32,
-	animation_zig: bool,
+	animation_zigging: bool,
 }
 
 Sample :: struct {
@@ -199,7 +199,6 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
 		return false
 	}
 
-	// TODO: validate
 	arena := state.available_samples_allocator
 	free_all(arena)
 	clear(&state.available_items)
@@ -251,7 +250,7 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
 			}
 		}
 
-		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items))
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
 	}
 
 	if len(state.available_items) > 0 {
@@ -264,7 +263,6 @@ load_directory_or_file :: proc(state: ^State, relative_path: string) -> bool {
 			return strings.compare(a.name, b.name) < 0
 		})
 	}
-
 	return true
 }
 
@@ -425,10 +423,9 @@ run_typing :: proc(state: ^State) {
 	typing := &state.typing
 
 	window_size := state.size
-	center       := window_size / 2
+	center      := window_size / 2
 	dt          := state.dt
 	tc := create_text_config(0.06, window_size)
-
 
 	if typing.sample == nil {
 		draw_text(.Draw, center, tc.font_size, COLOR_FG, "Sample was not set!")
@@ -437,8 +434,6 @@ run_typing :: proc(state: ^State) {
 
 	// Input
 	if !typing.completed {
-		// TODO: VIM bindings support
-
 		shift_down := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
 		ctrl_down  := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
 
@@ -662,6 +657,9 @@ run_typing :: proc(state: ^State) {
 					typing.completed   = true
 					typing.animation_t = 0
 
+					target_a, target_b := get_completion_animation_targets(typing, window_size)
+					typing.animation_t = target_b
+
 					typing.prev_duration = typing.sample.personal_best
 					typing.duration      = f32(rl.GetTime() - typing.started_time)
 					if typing.prev_duration == 0 || typing.duration < typing.prev_duration {
@@ -703,7 +701,6 @@ run_typing :: proc(state: ^State) {
 	for phase in UI_PHASES { 
 		cursor = cursor_start
 		if phase == .Draw {
-			// TODO: camera offset
 			cursor -= typing.offset_smooth
 		}
 
@@ -744,26 +741,24 @@ run_typing :: proc(state: ^State) {
 		}
 	}
 
+	typing.current_typed_height = cursor.y
+
 	if typing.completed {
 		// Admire the view
 
-		// Only true when the typing has completed btw
-		document_height := cursor.y
+		target_a, target_b := get_completion_animation_targets(typing, window_size)
 
-		target_a := -window_size.y * 0.1
-		target_b := math.max(0, document_height - window_size.y + window_size.y * 0.1)
-
-		if typing.animation_zig {
+		if typing.animation_zigging {
 			typing.animation_t += dt * window_size.y * ANIMATE_SPEED
 			if typing.animation_t > target_b {
 				typing.animation_t = target_b
-				typing.animation_zig = !typing.animation_zig
+				typing.animation_zigging = !typing.animation_zigging
 			}
 		} else {
 			typing.animation_t -= dt * window_size.y * ANIMATE_SPEED
 			if typing.animation_t < target_a {
 				typing.animation_t = target_a
-				typing.animation_zig = !typing.animation_zig
+				typing.animation_zigging = !typing.animation_zigging
 			}
 		}
 	}
@@ -773,7 +768,7 @@ run_typing :: proc(state: ^State) {
 		typing.blink_time -= BLINK_TIME
 	}
 
-	if typing.blink_time < BLINK_TIME / 2 {
+	if typing.blink_time < BLINK_TIME / 2 || typing.completed {
 		// This is the size we need for the cursor to mathematically fit between the letters without
 		// touching the letters and also distribute the spacing nicely
 		cursor_width   := tc.font_size / 10
@@ -783,16 +778,12 @@ run_typing :: proc(state: ^State) {
 
 	// Status line
 	{
-		font_size         := tc.font_size / 1.5
-		vertical_spacing  := font_size / 5
-		spacing           := font_size / 10
-		statusline_height := font_size + vertical_spacing
-		top_corner        := Vec2{spacing, window_size.y} - {0, statusline_height}
-		cursor            := top_corner + {0, vertical_spacing / 2}
+		tc := create_text_config(tc.vh / 1.5, window_size)
+		height := tc.font_size
+		cursor := Vec2{tc.spacing, window_size.y - height}
+		rl.DrawRectangleV(cursor, {window_size.x - 2 * tc.spacing, height}, COLOR_BG)
 
-		rl.DrawRectangleV(top_corner, {window_size.x, statusline_height}, COLOR_BG)
-
-		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v", typing.sample.name)
+		cursor.x += draw_text(.Draw, cursor, tc.font_size, COLOR_FG, "%v", typing.sample.name)
 
 		duration : f32
 		if typing.completed {
@@ -801,55 +792,64 @@ run_typing :: proc(state: ^State) {
 			duration = f32(rl.GetTime() - typing.started_time)
 		}
 
-		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | time: %.3f", duration)
+		cursor.x += draw_text(.Draw, cursor, tc.font_size, COLOR_FG, " | time: %.3f", duration)
 		if typing.sample.personal_best != 0 {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | personal best: %.3f", typing.sample.personal_best)
+			cursor.x += draw_text(.Draw, cursor, tc.font_size, COLOR_FG, " | personal best: %.3f", typing.sample.personal_best)
 		} else {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | no record set")
+			cursor.x += draw_text(.Draw, cursor, tc.font_size, COLOR_FG, " | no record set")
 		}
 		if typing.perfect {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " | [perfect]")
+			cursor.x += draw_text(.Draw, cursor, tc.font_size, COLOR_FG, " | [perfect]")
 		}
 	}
 
 	if typing.completed {
 		font_size := window_size.y * 0.05
-		
-		cursor := Vec2{0, 0}
-		height := 2 * font_size
-		if typing.prev_duration != 0 {
-			height += font_size
-		}
-		rl.DrawRectangleV(cursor, {window_size.x, height}, COLOR_BG)
-		cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "%v Completed in %.3f seconds!", typing.sample.name, typing.duration)
-		if typing.perfect {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, " You made no mistakes. ")
-		}
+		typing.animation_new_record += dt * 0.5 * window_size.y
 
-		if typing.duration < typing.prev_duration {
-			col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
-			typing.animation_new_record += dt * 0.5 * window_size.y
-			cursor.x += draw_text(.Draw, cursor, font_size, col, "New record!!!")
-		}
+		cursor_start := Vec2{0, 0}
+		cursor       := cursor_start
 
-		cursor.x = 0
-		cursor.y += font_size
+		for phase in UI_PHASES {
+			height :=  cursor.y - cursor_start.y
+			cursor = cursor_start
 
-		if typing.prev_duration != 0 {
-			cursor.x += draw_text(.Draw, cursor, font_size, COLOR_FG, "Your old time was %.3f seconds.", typing.prev_duration)
-			cursor.x += 50
+			if phase == .Draw {
+				rl.DrawRectangleV(cursor, {window_size.x, height}, COLOR_BG)
+			}
+
+			cursor.x += draw_text(phase, cursor, font_size, COLOR_FG, "%v", typing.sample.name)
+
+			cursor = {0, cursor.y + font_size}
+			cursor.x += draw_text(phase, cursor, font_size, COLOR_FG, "Completed in %.3f seconds!", typing.duration)
+			if typing.duration < typing.prev_duration {
+				col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
+				cursor.x += draw_text(phase, cursor, font_size, col, " New record!!!")
+			}
+
+			if typing.perfect {
+				cursor = {0, cursor.y + font_size}
+				col := rl.ColorFromHSV(typing.animation_new_record, 1, 1)
+				cursor.x += draw_text(phase, cursor, font_size, col, "You made no mistakes. ")
+			}
 
 
-			cursor.x = 0
-			cursor.y += font_size
-		}
+			if typing.prev_duration != 0 {
+				cursor = {0, cursor.y + font_size}
+				cursor.x += draw_text(phase, cursor, font_size, COLOR_FG, "Your old time was %.3f seconds.", typing.prev_duration)
+				cursor.x += 50
+			}
 
-		n := len(state.available_items)
-		if state.item_idx < n - 1 {
-			next_sample := state.available_items[state.item_idx + 1]
-			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> next sample - %v, [R] -> Restart", next_sample.name)
-		} else {
-			draw_text(.Draw, cursor, font_size, COLOR_FG, "[Enter] -> collections, [R] -> Restart")
+			cursor = {0, cursor.y + font_size}
+			n := len(state.available_items)
+			if state.item_idx < n - 1 {
+				next_sample := state.available_items[state.item_idx + 1]
+				draw_text(phase, cursor, font_size, COLOR_FG, "[Enter] -> next sample - %v, [R] -> Restart", next_sample.name)
+			} else {
+				draw_text(phase, cursor, font_size, COLOR_FG, "[Enter] -> collections, [R] -> Restart")
+			}
+
+			cursor = {0, cursor.y + font_size}
 		}
 	}
 
@@ -861,6 +861,13 @@ run_typing :: proc(state: ^State) {
 			state.view = .Samples
 		}
 	}
+}
+
+get_completion_animation_targets :: proc(typing: ^TypingState, window_size: Vec2) -> (f32, f32) {
+	// When completed, typing.current_typed_height should be the full height of the text we typed
+	target_a := -window_size.y * 0.4
+	target_b := math.max(0, typing.current_typed_height + window_size.y * 0.4)
+	return target_a, target_b
 }
 
 LetterType :: enum {
@@ -925,7 +932,7 @@ move_cursor_next_boundary :: proc(pos: int, text: []byte) -> int {
 
 // Pretend to draw something. Measure how big it was, and use that info to draw it in the right place, or to draw it differently.
 // It can be used for any kind of measuring though. E.g I also use it to check if we encoutnered any incorrect letters, and if not, 
-// render the text row _without_ the target row.
+// render the text row _without_ the target row. At least I used to do that, but the code has changed since then
 UiPhase :: enum {
 	Measure,
 	Draw,
@@ -1032,14 +1039,17 @@ run_sample_selector :: proc(state: ^State) {
 	case rlIsKeyPressedOrRepeated(.DOWN): 
 		num_items := len(state.available_items)
 		state.item_idx += 1
-		if state.item_idx > num_items {
-			state.item_idx = num_items -1
-		}
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
 	case rlIsKeyPressedOrRepeated(.UP):   
 		state.item_idx -= 1
-		if state.item_idx < 0 {
-			state.item_idx = 0
-		}
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
+	case rlIsKeyPressedOrRepeated(.PAGE_DOWN): 
+		num_items := len(state.available_items)
+		state.item_idx += 10
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
+	case rlIsKeyPressedOrRepeated(.PAGE_UP):   
+		state.item_idx -= 10
+		state.item_idx = math.clamp(state.item_idx, 0, len(state.available_items) - 1)
 	case rlIsKeyPressedOrRepeated(.ENTER): 
 		current_item := state.available_items[state.item_idx]
 		switch current_item.type {
@@ -1066,6 +1076,7 @@ run_sample_selector :: proc(state: ^State) {
 			state.requested_quit = true
 		}
 	}
+
 
 	if len(state.available_items) == 0 {
 		draw_text(.Draw, center, tc.font_size, COLOR_FG, "No items available")
@@ -1288,12 +1299,14 @@ DrawTextResult :: struct {
 }
 
 TextConfig :: struct {
+	vh: f32,
 	font_size, spacing, vertical_spacing : f32,
 	row_offset: Vec2,
 }
 
-create_text_config :: proc(font_size_wh: f32, window_size: Vec2) -> (result: TextConfig) {
-	result.font_size          = math.round(window_size.y * font_size_wh)
+create_text_config :: proc(font_size_vh: f32, window_size: Vec2) -> (result: TextConfig) {
+	result.vh = font_size_vh;
+	result.font_size          = math.round(window_size.y * font_size_vh)
 	result.spacing            = f32(0) // font_size / 10
 	result.vertical_spacing   = result.font_size / 5
 	result.row_offset         = Vec2{0, result.font_size + result.vertical_spacing}
@@ -1493,9 +1506,14 @@ main :: proc() {
 		}
 	}
 	
-	rl.SetConfigFlags({.VSYNC_HINT, .WINDOW_HIGHDPI})
-	rl.InitWindow(0, 0, "RoboType")
-	rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
+	// Can't use .WINDOW_HIGHDPI because the height returned by GetScreenHeight and GetRenderHeight are both underreportoed
+	rl.SetConfigFlags({.VSYNC_HINT})
+	rl.InitWindow(800, 600, "RoboType")
+	if WINDOWED {
+		rl.SetWindowState({.WINDOW_RESIZABLE})
+	} else {
+		rl.SetWindowState({.WINDOW_MAXIMIZED, .WINDOW_RESIZABLE})
+	}
 	rl.SetExitKey(.KEY_NULL)
 
 	last_monitor = -1
