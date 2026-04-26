@@ -1,6 +1,6 @@
 # RoboType
 
-This is the completed version of my submission to the 2026 handmade jam. 
+This is the completed version of my submission to the 2026 handmade jam. (The one I had by the end of the jam was _not_ this one)
 
 ## What is it
 

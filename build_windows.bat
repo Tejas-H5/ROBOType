@@ -25,6 +25,13 @@ if %errorlevel% GEQ 8 (
     echo Task failed with error %errorlevel%
     exit /b %errorlevel%
 )
+md %OUTPUT_DIR%\collections
+robocopy .\font .\%OUTPUT_DIR%\font /s /e
+REM https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/robocopy#exit-return-codes
+if %errorlevel% GEQ 8 (
+    echo Task failed with error %errorlevel%
+    exit /b %errorlevel%
+)
 
 powershell -C "Compress-Archive -Path %OUTPUT_DIR% -DestinationPath %BUILDS_DIR%\ROBOType-windows-%VERSION%.zip"
 if %errorlevel% neq 0 (
