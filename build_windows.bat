@@ -1,6 +1,6 @@
 @echo off
 
-SET VERSION=v1.0.0
+SET VERSION=v1.0.1
 
 SET OUTPUT_DIR=build\windows\output
 SET BUILDS_DIR=build\windows\

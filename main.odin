@@ -77,7 +77,6 @@ State :: struct {
 
 	view: View,
 
-	// NOTE: all this stuff needs a total rework.
 	current_path : ^CurrentPath,
 
 	available_items : [dynamic]LoadableItem,
@@ -677,8 +676,10 @@ run_typing :: proc(state: ^State) {
 			n := len(state.available_items)
 
 			if state.item_idx < n - 1 {
-				state.item_idx += 1
-				start_typing(state, typing.sample)
+				// NOTE: black magic incantation. see start_typing internals
+				next_sample := state.typing.next_sample
+				state.item_idx = state.typing.next_sample_idx
+				start_typing(state, next_sample)
 			} else {
 				state.view = .Samples
 			}
@@ -1196,9 +1197,6 @@ draw_centered_label :: proc(
 	}
 
 	return {width, font_size}
-}
-
-run_completed :: proc(state: ^State) {
 }
 
 DrawLineResult :: struct {
